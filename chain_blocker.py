@@ -75,7 +75,6 @@ class BlockHistory(DeclarativeBase):
     id = sqla.Column(sqla.Integer, primary_key=True)
     user_id = sqla.Column(sqla.Integer)
     screen_name = sqla.Column(sqla.String)
-    name = sqla.Column(sqla.String)
     followers = sqla.Column(sqla.Integer)
     following = sqla.Column(sqla.Integer)
     mode = sqla.Column(sqla.String) # "block/unblock:followers+target+following"
@@ -93,7 +92,6 @@ class BlockList(DeclarativeBase):
     __tablename__ = "blocked_accounts"
     user_id = sqla.Column(sqla.Integer, primary_key=True)
     screen_name = sqla.Column(sqla.String)
-    name = sqla.Column(sqla.String)
     block_time = sqla.Column(sqla.Float)
     reason = sqla.Column(sqla.String)
 
@@ -119,16 +117,12 @@ class MetaQueue(DeclarativeBase):
     id = sqla.Column(sqla.Integer, primary_key=True)
     user_id = sqla.Column(sqla.Integer)
     screen_name = sqla.Column(sqla.String)
-    name = sqla.Column(sqla.String)
     followers = sqla.Column(sqla.Integer)
     following = sqla.Column(sqla.Integer)
     action = sqla.Column(sqla.String)
     session_comment = sqla.Column(sqla.String)
 
-#FIXME: add metaqueue
-#
-#account_name
-#action
+#FIXME: finish implementing metaqueue
 
 def get_user(user_id: Optional[int] = None,
              screen_name: Optional[str] = None) -> User:
@@ -245,7 +239,7 @@ def block_followers_of(target_user: User, db_session: Session,
     time_start = time.time()
 
     block_history = BlockHistory(
-        user_id=target_user.id, screen_name=target_user.screen_name, name=target_user.name,
+        user_id=target_user.id, screen_name=target_user.screen_name,
         followers=target_user.followers_count, following=target_user.friends_count, mode="+".join(mode_str),
         time=time_start, queued=0, skipped_blocked=0, skipped_queued=0, skipped_following=0)
 
@@ -353,7 +347,7 @@ def process_block_queue(db_session: Session, whitelisted_accounts: Optional[List
                         # code 50 means "user not found" but when inspecting ids for which this error was thrown
                         # web twitter reported the users as suspended
                         # it's possible that 50 means permanent suspension/account deletion
-                        # update: that's exactly ehat this means
+                        # update: that's exactly what this means
                         LOGGER.warning("User suspended permanently or account deleted (code 50): %s", queued_block.user_id)
                         blocked_num += 1
                         db_session.delete(queued_block)
@@ -376,7 +370,7 @@ def process_block_queue(db_session: Session, whitelisted_accounts: Optional[List
 
                 block_row = BlockList(
                     user_id=blocked_user.id, screen_name=blocked_user.screen_name,
-                    name=blocked_user.name, block_time=time.time(), reason=queued_block.reason)
+                    block_time=time.time(), reason=queued_block.reason)
 
                 print(f"Blocked {blocked_user.screen_name} ({blocked_user.name}) - id {blocked_user.id}")
 
@@ -402,7 +396,7 @@ def process_block_queue(db_session: Session, whitelisted_accounts: Optional[List
     return blocked_num
 
 
-def db_maintenance(db_session):
+def db_maintenance(db_session: Session) -> None:
     ###Clean orphaned blocks in queue
     last_user_id = 0
     block_queue_query = db_session.query(BlockQueue).filter(BlockQueue.user_id > last_user_id).order_by(BlockQueue.user_id)
@@ -477,8 +471,8 @@ def main(args: Optional[str] = None) -> None:
             update_blocklist(db_session)
 
         if args.account_name:
-            if not args.comment:
-                comment = f"Instance started at {datetime.datetime.now.isoformat()}"
+            #if not args.comment:
+                #comment = f"Instance started at {datetime.datetime.now.isoformat()}"
             for account_name in args.account_name:
                 target_user = get_user(screen_name=account_name)
                 LOGGER.info("Queueing blocks for followers of USER=%s ID=%s", target_user.screen_name, target_user.id)
