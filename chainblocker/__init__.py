@@ -1,10 +1,10 @@
 """"""
 import time
-
 import shutil
 import logging
 import datetime
 from pathlib import Path
+
 from argparse import ArgumentParser
 from typing import Any, Generator, Iterable, List, Optional, Tuple
 
@@ -14,9 +14,10 @@ from tweepy.models import User
 import sqlalchemy as sqla
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
-DeclarativeBase = declarative_base()
 
-import config
+from . import config
+
+DeclarativeBase = declarative_base()
 
 WORKING_DIR = Path.home() / "Twitter ChainBlocker"
 WORKING_DIR.mkdir(exist_ok=True)
@@ -114,6 +115,7 @@ class UnblockQueue(DeclarativeBase):
 
 
 class MetaQueue(DeclarativeBase):
+    """"""
     id = sqla.Column(sqla.Integer, primary_key=True)
     user_id = sqla.Column(sqla.Integer)
     screen_name = sqla.Column(sqla.String)
@@ -148,6 +150,7 @@ def get_follower_id_pages(user_id: int) -> Generator[Iterable[int], None, None]:
 
 
 def get_follower_ids(user_id: bool) -> Generator[int, None, None]:
+    """"""
     for follower_page in get_follower_id_pages(user_id):
         for follower_id in follower_page:
             yield follower_id
@@ -161,12 +164,13 @@ def get_followed_id_pages(user_id: int) -> Generator[List[int], None, None]:
 
 
 def get_followed_ids(user_id: int) -> Generator[int, None, None]:
+    """"""
     for followed_page in get_followed_id_pages(user_id):
         for followed_id in followed_page:
             yield followed_id
 
 
-def get_blocked_ids(page_mode: bool = False) -> Generator[int, None, None]:
+def get_blocked_ids() -> Generator[int, None, None]:
     """"""
     for loop_num, blocked_page in enumerate(tweepy.Cursor(TW_API.blocks_ids, skip_status=True, include_entities=False).pages()):
         print("Requested blocked page #", loop_num+1, sep="")
@@ -311,6 +315,7 @@ def block_followers_of(target_user: User, db_session: Session,
 def unblock_followers_of(target_user: User, db_session: Session,
                          unblock_followers: bool = True, unblock_target: bool = True,
                          unblock_following: bool = False) -> int:
+    """"""
     #FIXME: this is essentially the last bit of the basic functionality that's missing
     raise NotImplementedError
 
@@ -411,8 +416,9 @@ def db_maintenance(db_session: Session) -> None:
                 LOGGER.warning("Deleting already blocked user from queue: %s", queued_block.user_id)
                 db_session.delete(queued_block)
 
-        queue_query = db_session.query(BlockQueue).filter(BlockQueue.user_id > last_user_id).order_by(BlockQueue.user_id)
         db_session.commit()
+        block_queue_query = db_session.query(BlockQueue).filter(BlockQueue.user_id > last_user_id).order_by(BlockQueue.user_id)
+
     #TODO: ^ do the same for unblocks
     ###Clean orphaned unblocks in queue
 
@@ -423,8 +429,6 @@ def db_maintenance(db_session: Session) -> None:
         LOGGER.info("Vacuuming database...")
         #TODO: perform db vacuum
         #last_vacuum_row.val = str(time.time())
-        #db_session.flush()
-        pass
 
     db_session.commit()
 
