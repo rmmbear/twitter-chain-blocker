@@ -1,26 +1,29 @@
 """"""
 import time
-import shutil
 import logging
 import datetime
-from pathlib import Path
 
-from argparse import ArgumentParser
 from typing import Any, Generator, Iterable, List, Optional, Tuple
 
 import tweepy
 from tweepy.models import User
 
 import sqlalchemy as sqla
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session
 from sqlalchemy.ext.declarative import declarative_base
 
 from . import config
 
-DeclarativeBase = declarative_base()
+__all__ = [
+    #Globals
+    "TW_API",
+    #Classes
+    "TopQueue", "UnblockQueue", "BlockQueue", "BlockList", "Metadata", "BlocklistDBBase",
+    #Functions
+    "db_maintenance", "process_block_queue", "unblock_followers_of", "block_followers_of",
+    "enqueue_block", "update_blocklist", "get_user",
+    ]
 
-WORKING_DIR = Path.home() / "Twitter ChainBlocker"
-WORKING_DIR.mkdir(exist_ok=True)
 
 LOG_FORMAT_TERM = logging.Formatter("[%(levelname)s] %(message)s")
 LOGGER = logging.getLogger("ChainBlocker")
@@ -41,7 +44,9 @@ TW_API = tweepy.API(AUTH,
                    )
 
 
-class Metadata(DeclarativeBase):
+BlocklistDBBase = declarative_base()
+
+class Metadata(BlocklistDBBase):
     """"""
     __tablename__ = "metadata"
     key = sqla.Column(sqla.String, primary_key=True)
@@ -70,7 +75,7 @@ class Metadata(DeclarativeBase):
         return row
 
 
-class BlockHistory(DeclarativeBase):
+class BlockHistory(BlocklistDBBase):
     """"""
     __tablename__ = "history"
     id = sqla.Column(sqla.Integer, primary_key=True)
@@ -88,7 +93,7 @@ class BlockHistory(DeclarativeBase):
     #FIXME: implement comment (one comment for session's batch of accounts)
 
 
-class BlockList(DeclarativeBase):
+class BlockList(BlocklistDBBase):
     """"""
     __tablename__ = "blocked_accounts"
     user_id = sqla.Column(sqla.Integer, primary_key=True)
@@ -97,25 +102,25 @@ class BlockList(DeclarativeBase):
     reason = sqla.Column(sqla.String)
 
 
-class BlockQueue(DeclarativeBase):
+class BlockQueue(BlocklistDBBase):
     """"""
     __tablename__ = "block_queue"
     user_id = sqla.Column(sqla.Integer, primary_key=True)
     queued_at = sqla.Column(sqla.Float)
-    #group = sqla.Column(sqla.String)
-    #FIXME: info on whether this is a follower / followed / target for unblock functionality
     reason = sqla.Column(sqla.String)
 
 
-class UnblockQueue(DeclarativeBase):
+class UnblockQueue(BlocklistDBBase):
     """"""
     __tablename__ = "unblock_queue"
     user_id = sqla.Column(sqla.Integer, primary_key=True)
+    queued_at = sqla.Column(sqla.Float)
+    reason = sqla.Column(sqla.String)
 
 
-
-class MetaQueue(DeclarativeBase):
+class TopQueue(BlocklistDBBase):
     """"""
+    __tablename__ = "top_queue"
     id = sqla.Column(sqla.Integer, primary_key=True)
     user_id = sqla.Column(sqla.Integer)
     screen_name = sqla.Column(sqla.String)
@@ -124,7 +129,6 @@ class MetaQueue(DeclarativeBase):
     action = sqla.Column(sqla.String)
     session_comment = sqla.Column(sqla.String)
 
-#FIXME: finish implementing metaqueue
 
 def get_user(user_id: Optional[int] = None,
              screen_name: Optional[str] = None) -> User:
@@ -184,7 +188,7 @@ def update_blocklist(db_session: Session, force: bool = False) -> None:
     # only update blocklist if at least a day has passed since last update
     min_delay = 86400
     last_update_time = float(last_update_row.val)
-    if (time.time() - last_update_time) < min_delay:
+    if (time.time() - last_update_time) < min_delay and not force:
         return
 
     print("Updating account's blocklist, this might take a while...")
@@ -226,8 +230,7 @@ def block_followers_of(target_user: User, db_session: Session,
                        whitelisted_accounts: Optional[List[int]] = None) -> int:
     """"""
     if not (block_followers or block_target or block_following):
-        LOGGER.warning("Bad arguments - no blocks will be queued")
-        return 0
+        raise RuntimeError("Bad arguments - no blocks will be queued")
 
     print(target_user.screen_name, ": This user has", target_user.followers_count, "followers")
     block_reason = str(target_user.id)
@@ -244,12 +247,13 @@ def block_followers_of(target_user: User, db_session: Session,
 
     block_history = BlockHistory(
         user_id=target_user.id, screen_name=target_user.screen_name,
-        followers=target_user.followers_count, following=target_user.friends_count, mode="+".join(mode_str),
+        followers=target_user.followers_count, following=target_user.friends_count, mode=f"block:{'+'.join(mode_str)}",
         time=time_start, queued=0, skipped_blocked=0, skipped_queued=0, skipped_following=0)
 
     db_session.add(block_history)
     del mode_str
 
+    #FIXME: remove unblocks from UnblockQueue and update the reason in BlockList
     if block_followers:
         for followers_page in get_follower_id_pages(target_user.id):
             enqueued_blocks = []
@@ -268,7 +272,6 @@ def block_followers_of(target_user: User, db_session: Session,
             db_session.commit()
 
     if block_following:
-        raise NotImplementedError()
         for followed_page in get_followed_id_pages(target_user.id):
             enqueued_blocks = []
             for followed_id in followed_page:
@@ -298,6 +301,8 @@ def block_followers_of(target_user: User, db_session: Session,
         db_session.delete(block_history)
         db_session.commit()
 
+    # FIXME: remove target_user from metaqueue
+
     time_total = time.time() - time_start
     print(f"Queued:          {block_history.queued}")
     print(f"Already queued:  {block_history.skipped_queued}")
@@ -316,8 +321,46 @@ def unblock_followers_of(target_user: User, db_session: Session,
                          unblock_followers: bool = True, unblock_target: bool = True,
                          unblock_following: bool = False) -> int:
     """"""
-    #FIXME: this is essentially the last bit of the basic functionality that's missing
-    raise NotImplementedError
+    reasons = []
+
+    if unblock_followers:
+        reasons.append(f"follower:{target_user.id}")
+    if unblock_target:
+        reasons.append(f"target:{target_user.id}")
+    if unblock_following:
+        reasons.append(f"friend:{target_user.id}")
+
+    block_queue_query = db_session.query(BlockQueue).filter(BlockQueue.reason in reasons)
+    pending_block_queue = block_queue_query.count()
+    if pending_block_queue:
+        print(f"Removing {pending_block_queue} blocks from the queue")
+        block_queue_query.delete()
+        db_session.commit()
+
+    block_list_query = db_session.query(BlockList).filter(BlockQueue.reason in reasons)
+    pending_block_list = block_list_query.count()
+    if pending_block_list:
+        print(f"Queueing unblocks for {pending_block_list} users")
+        while db_session.query(block_list_query.exists()).scalar():
+            new_unblocks = []
+            for blocked_user in block_queue_query.limit(500).all():
+                unblock = UnblockQueue(
+                    user_id=blocked_user.id, queued_at=time.time(), reason=blocked_user.reason)
+                new_unblocks.append(unblock)
+                db_session.delete(blocked_user)
+
+            db_session.add_all(new_unblocks)
+            db_session.commit()
+
+    if not pending_block_queue and not pending_block_list:
+        print("Did not find any accounts to unblock")
+        return pending_block_list
+
+    print(f"Cancelled {pending_block_queue} blocks")
+    print(f"Queued {pending_block_list} unblocks")
+    return pending_block_list
+
+    #FIXME: remove target_user from metaqueue
 
 
 def process_block_queue(db_session: Session, whitelisted_accounts: Optional[List[int]] = None, batch_size: int = 20) -> int:
@@ -356,15 +399,14 @@ def process_block_queue(db_session: Session, whitelisted_accounts: Optional[List
                         LOGGER.warning("User suspended permanently or account deleted (code 50): %s", queued_block.user_id)
                         blocked_num += 1
                         db_session.delete(queued_block)
-                        db_session.flush()
+                        db_session.commit()
                         continue
 
                     if err.api_code == 63:
                         LOGGER.warning("User suspended (code 63), delaying block: %s", queued_block.user_id)
                         queued_block.queued_at += 86400 # wait a day before before re-attempting to block
-                        db_session.flush()
+                        db_session.commit()
                         continue
-
                     #tweepy.error.TweepError: Failed to send request: ('Connection aborted.', ConnectionResetError(104, 'Connection reset by peer'))
                     # ^ err.api_code and err.response are None
                     #FIXME: handle network errors by exiting early
@@ -431,90 +473,3 @@ def db_maintenance(db_session: Session) -> None:
         #last_vacuum_row.val = str(time.time())
 
     db_session.commit()
-
-
-ARGPARSER = ArgumentParser(prog="chainblocker")
-ARGPARSER.add_argument("account_name", default=[], nargs="*", help="")
-ARGPARSER.add_argument("--skip-blocklist-update", action="store_true",
-                       help="")
-ARGPARSER.add_argument("--only-queue-blocks", action="store_true",
-                       help="Accounts will be queued for blocking, but they won't be blocked until blocker is ran without this option enabled")
-ARGPARSER.add_argument("--dont-block-target", action="store_true",
-                       help="Do not block target accounts, only their followers")
-ARGPARSER.add_argument("--dont-block-followers", action="store_true",
-                       help="")
-ARGPARSER.add_argument("--block-targets-followed", action="store_true",
-                       help="Block accounts followed by target account")
-#TODO: implement show_user_info -just pretty print the User object + number of blocked users + block reason
-#TODO: implement session comments, with the default comment being the time of the session'start
-#TODO:
-def main(args: Optional[str] = None) -> None:
-    """"""
-    args = ARGPARSER.parse_args(args)
-
-    authenticated_user = TW_API.me()
-
-    dbfile = WORKING_DIR / f"{authenticated_user.id}_blocklist.sqlite"
-    sqla_engine = sqla.create_engine(f"sqlite:///{str(dbfile)}", echo=False)
-    DeclarativeBase.metadata.create_all(sqla_engine)
-    bound_session = sessionmaker(bind=sqla_engine)
-
-    LOGGER.info("Creating new db session")
-    session_start = time.time()
-    db_session = bound_session()
-    blocks_queued = 0
-    try:
-        clean_exit = Metadata.get_row("clean_exit", db_session, "1")
-        if clean_exit.val == "0":
-            LOGGER.warning("Exception encountered in last session, performing maintenance")
-            db_maintenance(db_session)
-
-        print("getting authenticated user's follows...")
-        authenticated_user_follows = [x for x in get_followed_ids(authenticated_user.id)]
-        if not args.skip_blocklist_update:
-            update_blocklist(db_session)
-
-        if args.account_name:
-            #if not args.comment:
-                #comment = f"Instance started at {datetime.datetime.now.isoformat()}"
-            for account_name in args.account_name:
-                target_user = get_user(screen_name=account_name)
-                LOGGER.info("Queueing blocks for followers of USER=%s ID=%s", target_user.screen_name, target_user.id)
-                blocks_queued += block_followers_of(
-                    target_user, db_session,
-                    block_followers=(not args.dont_block_followers), block_target=(not args.dont_block_target),
-                    block_following=(args.block_targets_followed), whitelisted_accounts=authenticated_user_follows)
-
-        print(f"Added {blocks_queued} new accounts to block queue")
-
-        if not args.only_queue_blocks:
-            print("Processing block queue")
-            process_block_queue(db_session, authenticated_user_follows)
-        Metadata.set_row("clean_exit", 1, db_session)
-    except:
-        LOGGER.error("Uncaught exception, rolling back db session")
-        db_session.rollback()
-        Metadata.set_row("clean_exit", 0, db_session)
-        raise
-    finally:
-        LOGGER.info("Closing db session")
-        db_session.close()
-
-
-if __name__ == "__main__":
-    FH = logging.FileHandler(WORKING_DIR / "chainblocker.log", mode="w")
-    FH.setLevel(logging.INFO)
-    FH.setFormatter(logging.Formatter("[%(levelname)s] %(asctime)s: %(message)s"))
-    LOGGER.addHandler(FH)
-    try:
-        main()
-    except Exception as exc:
-        # ignore argparse-issued systemexit
-        if not isinstance(exc, SystemExit):
-            LOGGER.exception("UNCAUGHT EXCEPTION:")
-            exception_log = WORKING_DIR / time.strftime("chainblocker_exception_%Y-%m-%dT_%H-%M-%S.log")
-            shutil.copy(FH.baseFilename, exception_log)
-            print("Chain blocker quit due to unexpected error!")
-            print(f"Error: {exc}")
-            print(f"Traceback has been saved to {str(exception_log)}")
-            print("If this issue persists, please report it to the project's github repo: https://github.com/rmmbear/twitter-chain-blocker")
