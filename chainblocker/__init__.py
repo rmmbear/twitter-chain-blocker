@@ -21,7 +21,7 @@ __all__ = [
     "TopQueue", "UnblockQueue", "BlockQueue", "BlockList", "Metadata", "BlocklistDBBase",
     #Functions
     "db_maintenance", "process_block_queue", "unblock_followers_of", "block_followers_of",
-    "enqueue_block", "update_blocklist", "get_user",
+    "enqueue_block", "update_blocklist", "get_user", "get_followed_ids"
     ]
 
 
@@ -67,7 +67,7 @@ class Metadata(BlocklistDBBase):
     @classmethod
     def set_row(cls, key_name: str, value: Any, db_session: Session) -> "Metadata":
         """Set the value of row with matching key and return it.
-        Creates the row if it does not exist.
+        Creates the row if it does not yet exist.
         """
         row = cls.get_row(key_name, db_session)
         row.val = str(value)
@@ -89,7 +89,7 @@ class BlockHistory(BlocklistDBBase):
     skipped_blocked = sqla.Column(sqla.Integer)
     skipped_queued = sqla.Column(sqla.Integer)
     skipped_following = sqla.Column(sqla.Integer)
-    session_comment = sqla.Column(sqla.String)
+    comment = sqla.Column(sqla.String)
     #FIXME: implement comment (one comment for session's batch of accounts)
 
 
@@ -126,8 +126,8 @@ class TopQueue(BlocklistDBBase):
     screen_name = sqla.Column(sqla.String)
     followers = sqla.Column(sqla.Integer)
     following = sqla.Column(sqla.Integer)
-    action = sqla.Column(sqla.String)
-    session_comment = sqla.Column(sqla.String)
+    action = sqla.Column(sqla.String) # "block/unblock:followers+target+following"
+    comment = sqla.Column(sqla.String)
 
 
 def get_user(user_id: Optional[int] = None,
@@ -174,29 +174,44 @@ def get_followed_ids(user_id: int) -> Generator[int, None, None]:
             yield followed_id
 
 
-def get_blocked_ids() -> Generator[int, None, None]:
+def get_blocked_id_pages() -> Generator[List[int], None, None]:
     """"""
     for loop_num, blocked_page in enumerate(tweepy.Cursor(TW_API.blocks_ids, skip_status=True, include_entities=False).pages()):
         print("Requested blocked page #", loop_num+1, sep="")
-        for blocked in blocked_page:
-            yield blocked
+        yield blocked_page
 
 
 def update_blocklist(db_session: Session, force: bool = False) -> None:
     """"""
     last_update_row = Metadata.get_row("last_blocklist_update", db_session, "0")
-    # only update blocklist if at least a day has passed since last update
-    min_delay = 86400
+    min_delay = 3600 # wait at least an hour before updating blocklist
     last_update_time = float(last_update_row.val)
     if (time.time() - last_update_time) < min_delay and not force:
         return
 
     print("Updating account's blocklist, this might take a while...")
-    for blocked_id in get_blocked_ids():
-        matching_id_query = db_session.query(BlockList).filter(BlockList.user_id == blocked_id)
-        if not db_session.query(matching_id_query.exists()).scalar():
-            db_session.add(BlockList(user_id=blocked_id, reason="unknown"))
+    import_history = []
+    imported_blocks_total = 0
+    for blocked_id_page in get_blocked_id_pages():
+        imported_blocks_page = 0
+        for blocked_id in blocked_id_page:
+            matching_id_query = db_session.query(BlockList).filter(BlockList.user_id == blocked_id)
+            if not db_session.query(matching_id_query.exists()).scalar():
+                db_session.add(BlockList(user_id=blocked_id, reason="unknown"))
+                imported_blocks_page += 1
 
+        import_history.append(imported_blocks_page)
+        imported_blocks_total += imported_blocks_page
+        LOGGER.debug("Imported %s blocks out of %s on this page", imported_blocks_page, len(blocked_id_page))
+
+        # exit early if we did not import any blocks in last three pages
+        # this number was chosen arbitrarily, 3 pages = 15k blocked ids
+        if len(import_history) >= 3:
+            if sum(import_history[-3:]) == 0:
+                LOGGER.info("Did not find new blocks in last 3 pages of blocks, quitting early")
+                break
+
+    LOGGER.info("Imported %s existing blocks", imported_blocks_total)
     last_update_row.val = str(time.time())
     db_session.commit()
 
@@ -233,7 +248,6 @@ def block_followers_of(target_user: User, db_session: Session,
         raise RuntimeError("Bad arguments - no blocks will be queued")
 
     print(target_user.screen_name, ": This user has", target_user.followers_count, "followers")
-    block_reason = str(target_user.id)
 
     mode_str = []
     if block_followers:
@@ -251,10 +265,10 @@ def block_followers_of(target_user: User, db_session: Session,
         time=time_start, queued=0, skipped_blocked=0, skipped_queued=0, skipped_following=0)
 
     db_session.add(block_history)
-    del mode_str
 
     #FIXME: remove unblocks from UnblockQueue and update the reason in BlockList
     if block_followers:
+        block_reason = f"follower_of:{target_user.id}"
         for followers_page in get_follower_id_pages(target_user.id):
             enqueued_blocks = []
             for follower_id in followers_page:
@@ -272,6 +286,7 @@ def block_followers_of(target_user: User, db_session: Session,
             db_session.commit()
 
     if block_following:
+        block_reason = f"followed_by:{target_user.id}"
         for followed_page in get_followed_id_pages(target_user.id):
             enqueued_blocks = []
             for followed_id in followed_page:
@@ -289,6 +304,7 @@ def block_followers_of(target_user: User, db_session: Session,
             db_session.commit()
 
     if block_target:
+        block_reason = f"target:{target_user.id}"
         new_block = enqueue_block(
             target_user.id, block_reason, db_session, history_object=block_history,
             whitelisted_accounts=whitelisted_accounts)
@@ -324,11 +340,11 @@ def unblock_followers_of(target_user: User, db_session: Session,
     reasons = []
 
     if unblock_followers:
-        reasons.append(f"follower:{target_user.id}")
+        reasons.append(f"follower_of:{target_user.id}")
     if unblock_target:
         reasons.append(f"target:{target_user.id}")
     if unblock_following:
-        reasons.append(f"friend:{target_user.id}")
+        reasons.append(f"followed_by:{target_user.id}")
 
     block_queue_query = db_session.query(BlockQueue).filter(BlockQueue.reason in reasons)
     pending_block_queue = block_queue_query.count()
@@ -465,11 +481,11 @@ def db_maintenance(db_session: Session) -> None:
     ###Clean orphaned unblocks in queue
 
     ###Vacuum the database
-    vacuum_delay = 86400
+    vacuum_delay = 3600 # 1 hour
     last_vacuum_row = Metadata.get_row("last_vacuum", db_session, "0")
     if float(last_vacuum_row.val) + vacuum_delay <= time.time():
         LOGGER.info("Vacuuming database...")
-        #TODO: perform db vacuum
-        #last_vacuum_row.val = str(time.time())
+        db_session.execute("VACUUM")
+        last_vacuum_row.val = str(time.time())
 
     db_session.commit()
