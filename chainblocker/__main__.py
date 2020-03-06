@@ -14,7 +14,7 @@ from chainblocker import *
 
 LOGGER = logging.getLogger(__name__)
 
-WORKING_DIR = Path.home() / "Twitter ChainBlocker"
+WORKING_DIR = Path.home() / "Twitter Chainblocker"
 WORKING_DIR.mkdir(exist_ok=True)
 
 
@@ -32,7 +32,6 @@ ARGPARSER.add_argument("--block-targets-followed", action="store_true",
                        help="Block accounts followed by target account")
 #TODO: implement show_user_info -just pretty print the User object + number of blocked users + block reason
 #TODO: implement session comments, with the default comment being the time of the session'start
-#TODO:
 def main(args: Optional[str] = None) -> None:
     """"""
     args = ARGPARSER.parse_args(args)
@@ -101,7 +100,7 @@ if __name__ == "__main__":
             LOGGER.exception("UNCAUGHT EXCEPTION:")
             exception_log = WORKING_DIR / time.strftime("chainblocker_exception_%Y-%m-%dT_%H-%M-%S.log")
             shutil.copy(FH.baseFilename, exception_log)
-            print("Chain blocker quit due to unexpected error!")
+            print("Chainblocker quit due to unexpected error!")
             print(f"Error: {exc}")
             print(f"Traceback has been saved to {str(exception_log)}")
             print("If this issue persists, please report it to the project's github repo: https://github.com/rmmbear/twitter-chain-blocker")
