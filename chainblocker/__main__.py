@@ -1,4 +1,5 @@
 """"""
+import os
 import time
 import shutil
 import logging
@@ -14,10 +15,6 @@ from chainblocker import *
 
 LOGGER = logging.getLogger(__name__)
 
-WORKING_DIR = Path.home() / "Twitter Chainblocker"
-WORKING_DIR.mkdir(exist_ok=True)
-
-
 ARGPARSER = ArgumentParser(prog="chainblocker")
 ARGPARSER.add_argument("account_name", default=[], nargs="*", help="")
 ARGPARSER.add_argument("--skip-blocklist-update", action="store_true",
@@ -32,6 +29,20 @@ ARGPARSER.add_argument("--block-targets-followed", action="store_true",
                        help="Block accounts followed by target account")
 #TODO: implement show_user_info -just pretty print the User object + number of blocked users + block reason
 #TODO: implement session comments, with the default comment being the time of the session'start
+
+def get_workdir() -> Path:
+    dirname = "Twitter Chainblocker"
+    # do not clutter people's home dir
+    if os.name == "posix":
+        return Path.home() / f".local/share/{dirname}"
+
+    return Path.home() / dirname
+
+
+WORKING_DIR = get_workdir()
+WORKING_DIR.mkdir(exist_ok=True)
+
+
 def main(args: Optional[str] = None) -> None:
     """"""
     args = ARGPARSER.parse_args(args)
@@ -89,7 +100,7 @@ def main(args: Optional[str] = None) -> None:
 
 if __name__ == "__main__":
     FH = logging.FileHandler(WORKING_DIR / "chainblocker.log", mode="w")
-    FH.setLevel(logging.INFO)
+    FH.setLevel(logging.DEBUG)
     FH.setFormatter(logging.Formatter("[%(levelname)s] %(asctime)s: %(message)s"))
     LOGGER.addHandler(FH)
     try:
