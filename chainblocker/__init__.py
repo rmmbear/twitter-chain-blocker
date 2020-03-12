@@ -21,7 +21,7 @@ __all__ = [
     "TopQueue", "UnblockQueue", "BlockQueue", "BlockList", "Metadata", "BlocklistDBBase",
     #Functions
     "db_maintenance", "process_block_queue", "unblock_followers_of", "block_followers_of",
-    "enqueue_block", "update_blocklist", "get_user", "get_followed_ids"
+    "enqueue_block", "update_blocklist", "get_user", "get_followed_ids", "blocks_status"
     ]
 
 
@@ -189,6 +189,13 @@ def update_blocklist(db_session: Session, force: bool = False) -> None:
     if (time.time() - last_update_time) < min_delay and not force:
         return
 
+    #FIXME: if we don't yet have any blocked accounts, this will go through __all__ of them
+    # there isn't a way of telling how many blocks a user has, other than going through all of them
+    # (well, technically it could be possible to manually mess with cursoring on /get/blocks/ids,
+    #  but that still uses up the limited requests for this endpoint, which is the thing we want to
+    #  avoid here)
+    # there used to be a way of exporting twitter blocks, but that has been thrown out in the 2019 redesign
+    # though, it is still accessible through the old interface (use user-agent trick to get it)
     print("Updating account's blocklist, this might take a while...")
     import_history = []
     imported_blocks_total = 0
@@ -459,7 +466,20 @@ def process_block_queue(db_session: Session, whitelisted_accounts: Optional[List
     return blocked_num
 
 
+def blocks_status(db_session: Session) -> dict:
+    """Return counts for queues and blocklist tables."""
+    tables_dict = {
+        "Blocked": BlockList,
+        "In Block Queue": BlockQueue,
+        "In Unblock Queue": UnblockQueue,
+    }
+    counts = {heading : db_session.query(table).count() for heading, table in tables_dict.items()}
+
+    return counts
+
+
 def db_maintenance(db_session: Session) -> None:
+    print("Performing database maintenance, this will take a while...")
     ###Clean orphaned blocks in queue
     last_user_id = 0
     block_queue_query = db_session.query(BlockQueue).filter(BlockQueue.user_id > last_user_id).order_by(BlockQueue.user_id)

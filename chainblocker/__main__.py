@@ -57,6 +57,10 @@ def main(args: Optional[str] = None) -> None:
     LOGGER.info("Creating new db session")
     session_start = time.time()
     db_session = bound_session()
+
+    for name, count in blocks_status(db_session).items():
+        print(f"{name} : {count}")
+
     blocks_queued = 0
     try:
         clean_exit = Metadata.get_row("clean_exit", db_session, "1")
