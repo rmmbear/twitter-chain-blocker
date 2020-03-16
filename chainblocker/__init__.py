@@ -13,11 +13,11 @@ from sqlalchemy.orm import Session
 from sqlalchemy.ext.declarative import declarative_base
 
 __all__ = [
-    #Classes
-    "TopQueue", "UnblockQueue", "BlockQueue", "BlockList", "Metadata", "BlocklistDBBase",
-    #Functions
-    "db_maintenance", "process_block_queue", "unblock_followers_of", "block_followers_of",
-    "enqueue_block", "update_blocklist", "get_user", "get_followed_ids", "blocks_status"
+    "AuthedUser", "BlockHistory", "BlockList", "BlockQueue",
+    "BlocklistDBBase", "Metadata", "TopQueue", "UnblockQueue",
+    "block_followers_of", "blocks_status", "db_maintenance",
+    "declarative_base", "enqueue_block", "process_block_queue",
+    "unblock_followers_of", "update_blocklist",
     ]
 
 
@@ -39,7 +39,7 @@ class Metadata(BlocklistDBBase):
     val = sqla.Column(sqla.String)
 
     @classmethod
-    def get_row(cls, key_name: str, db_session: Session, default_val="") -> "Metadata":
+    def get_row(cls, key_name: str, db_session: Session, default_val: str = "") -> "Metadata":
         """Find the row with matching key, or create it if it does not exists, and return it."""
         row = db_session.query(cls).filter(cls.key == key_name).one_or_none()
         if not row:
@@ -116,58 +116,118 @@ class TopQueue(BlocklistDBBase):
     comment = sqla.Column(sqla.String)
 
 
-def get_user(twtr_api: tweepy.API, user_id: Optional[int] = None,
-             screen_name: Optional[str] = None) -> User:
+class AuthedUser:
     """"""
-    if not (user_id or screen_name):
-        raise ValueError("Either user id or screen name must be provided")
-    if user_id and not isinstance(user_id, int):
-        raise TypeError("User id must be an integer")
-    if screen_name and not isinstance(screen_name, str):
-        raise TypeError("Screen name must be a string")
-
-    if user_id:
-        return twtr_api.get_user(user_id=user_id)
-
-    return twtr_api.get_user(screen_name=screen_name)
-
-
-def get_follower_id_pages(twtr_api: tweepy.API, user_id: int) -> Generator[Iterable[int], None, None]:
-    """Requires app authentication"""
-    for loop_num, follower_page in enumerate(tweepy.Cursor(twtr_api.followers_ids, user_id=user_id).pages()):
-        print("Requested follower page #", loop_num+1, sep="")
-        yield follower_page
+    def __init__(self, auth: tweepy.OAuthHandler):
+        """"""
+        self._user_obj = None
+        #TODO: keep track of rate limits
+        # call api.rate_limit_status at authorization
+        # possibly store rate limit data in db?
+        # update rate limits on the fly by accessing api.last_response
+        #self.rate_limits = {}
+        self.api = tweepy.API(
+            auth,
+            wait_on_rate_limit=True,
+            wait_on_rate_limit_notify=True,
+            retry_count=5, retry_delay=20,
+            retry_errors=[500, 502, 503, 504],
+        )
 
 
-def get_follower_ids(twtr_api: tweepy.API, user_id: bool) -> Generator[int, None, None]:
-    """Requires app authentication"""
-    for follower_page in get_follower_id_pages(twtr_api, user_id):
-        for follower_id in follower_page:
-            yield follower_id
+    @classmethod
+    def authenticate_interactive(cls) -> "AuthedUser":
+        """"""
+        # Note that inclusion of api keys below is intentional
+        # even desktop apps must use twitter's api keys for authentication,
+        # meaning that the only options for me are:
+        # 1. Create and maintain some sort of proxy authentication server
+        # 2. Include the keys in source code
+        # time and effort spent on implementing #1 is in my opinion not worth it
+        # the keys are tied to an account created only for the purposes of this project
+
+        # If you're here to use these keys for nefarious purposes:
+        # Hi! please don't go overboard with it :)
+        auth_handler = tweepy.OAuthHandler(
+            "y67bCUPU1TKtwnQZdCsG2MuX9",
+            "Sf1SBuK0RPnSw6SwbySrEMxa9"
+            "RmjDStZZ2dZHk0N1ufHMHDeZZ")
+        #TODO: implement key override - allow people to use their own keys for app-auth
+        auth_url = auth_handler.get_authorization_url()
+        print(f"Authnetication is required before we can continue.")
+        print(f"Please go to the following url and authorize the app")
+        print(f"{auth_url}")
+        auth_pin = input("Please paste the PIN here: ").strip()
+        #FIXME: perform error-checking, check input
+        access_token = auth_handler.get_access_token(auth_pin)
+        auth_handler.set_access_token(*access_token)
+        authed_user = cls(auth_handler)
+        print(f"Authentication successful for user '{authed_user.user.screen_name}'\n")
+        return authed_user
 
 
-def get_followed_id_pages(twtr_api: tweepy.API, user_id: int) -> Generator[List[int], None, None]:
-    """Requires app authentication"""
-    for loop_num, followed_page in enumerate(tweepy.Cursor(twtr_api.friends_ids, user_id=user_id).pages()):
-        print("Requested followed page #", loop_num+1, sep="")
-        yield followed_page
+    @property
+    def user(self) -> User:
+        """Return tweepy User object representation of authenticated user."""
+        if not self._user_obj:
+            self._user_obj = self.api.me()
+
+        return self._user_obj
 
 
-def get_followed_ids(twtr_api: tweepy.API, user_id: int) -> Generator[int, None, None]:
-    """Requires app authentication"""
-    for followed_page in get_followed_id_pages(twtr_api, user_id):
-        for followed_id in followed_page:
-            yield followed_id
+    def get_user(self, user_id: Optional[int] = None,
+                 screen_name: Optional[str] = None) -> User:
+        """"""
+        if not (user_id or screen_name):
+            raise ValueError("Either user id or screen name must be provided")
+        if user_id and not isinstance(user_id, int):
+            raise TypeError("User id must be an integer")
+        if screen_name and not isinstance(screen_name, str):
+            raise TypeError("Screen name must be a string")
+
+        if user_id:
+            return self.api.get_user(user_id=user_id)
+
+        return self.api.get_user(screen_name=screen_name)
 
 
-def get_blocked_id_pages(authd_usr: tweepy.API) -> Generator[List[int], None, None]:
-    """Requires user authentication"""
-    for loop_num, blocked_page in enumerate(tweepy.Cursor(authd_usr.blocks_ids, skip_status=True, include_entities=False).pages()):
-        print("Requested blocked page #", loop_num+1, sep="")
-        yield blocked_page
+    def get_follower_id_pages(self, user_id: int) -> Generator[Iterable[int], None, None]:
+        """Requires app authentication"""
+        for loop_num, follower_page in enumerate(tweepy.Cursor(self.api.followers_ids, user_id=user_id).pages()):
+            print("Requested follower page #", loop_num+1, sep="")
+            yield follower_page
 
 
-def update_blocklist(authd_usr: tweepy.API, db_session: Session, force: bool = False) -> None:
+    def get_follower_ids(self, user_id: bool) -> Generator[int, None, None]:
+        """Requires app authentication"""
+        for follower_page in self.get_follower_id_pages(user_id):
+            for follower_id in follower_page:
+                yield follower_id
+
+
+    def get_followed_id_pages(self, user_id: int) -> Generator[List[int], None, None]:
+        """Requires app authentication"""
+        for loop_num, followed_page in enumerate(tweepy.Cursor(self.api.friends_ids, user_id=user_id).pages()):
+            print("Requested followed page #", loop_num+1, sep="")
+            yield followed_page
+
+
+    def get_followed_ids(self, user_id: int) -> Generator[int, None, None]:
+        """Requires app authentication"""
+        for followed_page in self.get_followed_id_pages(user_id):
+            for followed_id in followed_page:
+                yield followed_id
+
+
+    def get_blocked_id_pages(self) -> Generator[List[int], None, None]:
+        """Requires user authentication"""
+        for loop_num, blocked_page in enumerate(tweepy.Cursor(self.api.blocks_ids, skip_status=True, include_entities=False).pages()):
+            print("Requested blocked page #", loop_num+1, sep="")
+            yield blocked_page
+
+
+
+def update_blocklist(authed_usr: AuthedUser, db_session: Session, force: bool = False) -> None:
     """Requires user authentication"""
     last_update_row = Metadata.get_row("last_blocklist_update", db_session, "0")
     min_delay = 3600 # wait at least an hour before updating blocklist
@@ -185,7 +245,7 @@ def update_blocklist(authd_usr: tweepy.API, db_session: Session, force: bool = F
     print("Updating account's blocklist, this might take a while...")
     import_history = []
     imported_blocks_total = 0
-    for blocked_id_page in get_blocked_id_pages(authd_usr):
+    for blocked_id_page in authed_usr.get_blocked_id_pages():
         imported_blocks_page = 0
         for blocked_id in blocked_id_page:
             matching_id_query = db_session.query(BlockList).filter(BlockList.user_id == blocked_id)
@@ -232,7 +292,7 @@ def enqueue_block(user_id: int, block_reason: str, db_session: Session, history_
     return queued_block, 0
 
 
-def block_followers_of(authd_usr: tweepy.API, target_user: User, db_session: Session,
+def block_followers_of(authed_usr: AuthedUser, target_user: User, db_session: Session,
                        block_followers: bool = True, block_target: bool = True,
                        block_following: bool = False,
                        whitelisted_accounts: Optional[List[int]] = None) -> int:
@@ -262,7 +322,7 @@ def block_followers_of(authd_usr: tweepy.API, target_user: User, db_session: Ses
     #FIXME: remove unblocks from UnblockQueue and update the reason in BlockList
     if block_followers:
         block_reason = f"follower_of:{target_user.id}"
-        for followers_page in get_follower_id_pages(authd_usr, target_user.id):
+        for followers_page in authed_usr.get_follower_id_pages(target_user.id):
             enqueued_blocks = []
             for follower_id in followers_page:
                 new_block = enqueue_block(
@@ -280,7 +340,7 @@ def block_followers_of(authd_usr: tweepy.API, target_user: User, db_session: Ses
 
     if block_following:
         block_reason = f"followed_by:{target_user.id}"
-        for followed_page in get_followed_id_pages(authd_usr, target_user.id):
+        for followed_page in authed_usr.get_followed_id_pages(target_user.id):
             enqueued_blocks = []
             for followed_id in followed_page:
                 new_block = enqueue_block(
@@ -372,7 +432,9 @@ def unblock_followers_of(target_user: User, db_session: Session,
     #FIXME: remove target_user from metaqueue
 
 
-def process_block_queue(db_session: Session, whitelisted_accounts: Optional[List[int]] = None, batch_size: int = 20) -> int:
+def process_block_queue(authed_usr: AuthedUser, db_session: Session,
+                        whitelisted_accounts: Optional[List[int]] = None,
+                        batch_size: int = 20) -> int:
     """"""
     time_start = time.time()
     queued_count = db_session.query(BlockQueue).count()
@@ -397,7 +459,7 @@ def process_block_queue(db_session: Session, whitelisted_accounts: Optional[List
                     continue
 
                 try:
-                    blocked_user = TW_API.create_block(user_id=queued_block.user_id)
+                    blocked_user = authed_usr.api.create_block(user_id=queued_block.user_id)
                 except tweepy.error.TweepError as err:
                     if err.api_code == 50:
                         # https://developer.twitter.com/en/docs/basics/response-codes

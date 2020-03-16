@@ -15,16 +15,6 @@ from chainblocker import *
 
 from . import config
 
-AUTH = tweepy.OAuthHandler(config.TWITTER_CONSUMER_API_KEY, config.TWITTER_SECRET_API_KEY)
-AUTH.set_access_token(config.TWITTER_ACCESS_TOKEN, config.TWITTER_SECRET_TOKEN)
-TW_API = tweepy.API(AUTH,
-                    wait_on_rate_limit=True,
-                    wait_on_rate_limit_notify=True,
-                    retry_count=5, retry_delay=60,
-                    retry_errors=[500, 502, 503, 504]
-                   )
-
-
 LOGGER = logging.getLogger(__name__)
 
 ARGPARSER = ArgumentParser(prog="chainblocker")
@@ -40,9 +30,10 @@ ARGPARSER.add_argument("--dont-block-followers", action="store_true",
 ARGPARSER.add_argument("--block-targets-followed", action="store_true",
                        help="Block accounts followed by target account")
 #TODO: implement show_user_info -just pretty print the User object + number of blocked users + block reason
-#TODO: implement session comments, with the default comment being the time of the session'start
+#TODO: implement session comments, with the default comment being the time of the session's start
 
 def get_workdir() -> Path:
+    """"""
     dirname = "Twitter Chainblocker"
     # do not clutter people's home dir
     if os.name == "posix":
@@ -58,10 +49,9 @@ WORKING_DIR.mkdir(exist_ok=True)
 def main(args: Optional[str] = None) -> None:
     """"""
     args = ARGPARSER.parse_args(args)
+    current_user = AuthedUser.authenticate_interactive()
 
-    authenticated_user = TW_API.me()
-
-    dbfile = WORKING_DIR / f"{authenticated_user.id}_blocklist.sqlite"
+    dbfile = WORKING_DIR / f"{current_user.user.id}_blocklist.sqlite"
     sqla_engine = sqla.create_engine(f"sqlite:///{str(dbfile)}", echo=False)
     BlocklistDBBase.metadata.create_all(sqla_engine)
     bound_session = sessionmaker(bind=sqla_engine)
@@ -70,8 +60,11 @@ def main(args: Optional[str] = None) -> None:
     session_start = time.time()
     db_session = bound_session()
 
+    print("Current blocklist statistics:")
     for name, count in blocks_status(db_session).items():
         print(f"{name} : {count}")
+
+    print()
 
     blocks_queued = 0
     try:
@@ -81,9 +74,9 @@ def main(args: Optional[str] = None) -> None:
             db_maintenance(db_session)
 
         print("getting authenticated user's follows...")
-        authenticated_user_follows = [x for x in get_followed_ids(TW_API, authenticated_user.id)]
+        authenticated_user_follows = [x for x in current_user.get_followed_ids(current_user.user.id)]
         if not args.skip_blocklist_update:
-            update_blocklist(TW_API, db_session)
+            update_blocklist(current_user, db_session)
 
         #TODO: add confirmation dialogues for blocking and unblocking
 
@@ -91,10 +84,10 @@ def main(args: Optional[str] = None) -> None:
             #if not args.comment:
                 #comment = f"Instance started at {datetime.datetime.now.isoformat()}"
             for account_name in args.account_name:
-                target_user = get_user(TW_API, screen_name=account_name)
+                target_user = current_user.get_user(screen_name=account_name)
                 LOGGER.info("Queueing blocks for followers of USER=%s ID=%s", target_user.screen_name, target_user.id)
                 blocks_queued += block_followers_of(
-                    TW_API, target_user, db_session,
+                    authed_usr=current_user, target_user=target_user, db_session=db_session,
                     block_followers=(not args.dont_block_followers), block_target=(not args.dont_block_target),
                     block_following=(args.block_targets_followed), whitelisted_accounts=authenticated_user_follows)
 
@@ -102,7 +95,7 @@ def main(args: Optional[str] = None) -> None:
 
         if not args.only_queue_blocks:
             print("Processing block queue")
-            process_block_queue(db_session, authenticated_user_follows)
+            process_block_queue(current_user, db_session, authenticated_user_follows)
         Metadata.set_row("clean_exit", 1, db_session)
     except:
         LOGGER.error("Uncaught exception, rolling back db session")
