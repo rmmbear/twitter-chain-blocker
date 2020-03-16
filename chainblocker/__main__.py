@@ -13,6 +13,18 @@ from sqlalchemy.orm import sessionmaker
 
 from chainblocker import *
 
+from . import config
+
+AUTH = tweepy.OAuthHandler(config.TWITTER_CONSUMER_API_KEY, config.TWITTER_SECRET_API_KEY)
+AUTH.set_access_token(config.TWITTER_ACCESS_TOKEN, config.TWITTER_SECRET_TOKEN)
+TW_API = tweepy.API(AUTH,
+                    wait_on_rate_limit=True,
+                    wait_on_rate_limit_notify=True,
+                    retry_count=5, retry_delay=60,
+                    retry_errors=[500, 502, 503, 504]
+                   )
+
+
 LOGGER = logging.getLogger(__name__)
 
 ARGPARSER = ArgumentParser(prog="chainblocker")
@@ -69,9 +81,9 @@ def main(args: Optional[str] = None) -> None:
             db_maintenance(db_session)
 
         print("getting authenticated user's follows...")
-        authenticated_user_follows = [x for x in get_followed_ids(authenticated_user.id)]
+        authenticated_user_follows = [x for x in get_followed_ids(TW_API, authenticated_user.id)]
         if not args.skip_blocklist_update:
-            update_blocklist(db_session)
+            update_blocklist(TW_API, db_session)
 
         #TODO: add confirmation dialogues for blocking and unblocking
 
@@ -79,10 +91,10 @@ def main(args: Optional[str] = None) -> None:
             #if not args.comment:
                 #comment = f"Instance started at {datetime.datetime.now.isoformat()}"
             for account_name in args.account_name:
-                target_user = get_user(screen_name=account_name)
+                target_user = get_user(TW_API, screen_name=account_name)
                 LOGGER.info("Queueing blocks for followers of USER=%s ID=%s", target_user.screen_name, target_user.id)
                 blocks_queued += block_followers_of(
-                    target_user, db_session,
+                    TW_API, target_user, db_session,
                     block_followers=(not args.dont_block_followers), block_target=(not args.dont_block_target),
                     block_following=(args.block_targets_followed), whitelisted_accounts=authenticated_user_follows)
 

@@ -12,11 +12,7 @@ import sqlalchemy as sqla
 from sqlalchemy.orm import Session
 from sqlalchemy.ext.declarative import declarative_base
 
-from . import config
-
 __all__ = [
-    #Globals
-    "TW_API",
     #Classes
     "TopQueue", "UnblockQueue", "BlockQueue", "BlockList", "Metadata", "BlocklistDBBase",
     #Functions
@@ -33,16 +29,6 @@ TH.setLevel(logging.WARNING)
 TH.setFormatter(LOG_FORMAT_TERM)
 
 LOGGER.addHandler(TH)
-
-AUTH = tweepy.OAuthHandler(config.TWITTER_CONSUMER_API_KEY, config.TWITTER_SECRET_API_KEY)
-AUTH.set_access_token(config.TWITTER_ACCESS_TOKEN, config.TWITTER_SECRET_TOKEN)
-TW_API = tweepy.API(AUTH,
-                    wait_on_rate_limit=True,
-                    wait_on_rate_limit_notify=True,
-                    retry_count=5, retry_delay=60,
-                    retry_errors=[500, 502, 503, 504]
-                   )
-
 
 BlocklistDBBase = declarative_base()
 
@@ -130,7 +116,7 @@ class TopQueue(BlocklistDBBase):
     comment = sqla.Column(sqla.String)
 
 
-def get_user(user_id: Optional[int] = None,
+def get_user(twtr_api: tweepy.API, user_id: Optional[int] = None,
              screen_name: Optional[str] = None) -> User:
     """"""
     if not (user_id or screen_name):
@@ -141,48 +127,48 @@ def get_user(user_id: Optional[int] = None,
         raise TypeError("Screen name must be a string")
 
     if user_id:
-        return TW_API.get_user(user_id=user_id)
+        return twtr_api.get_user(user_id=user_id)
 
-    return TW_API.get_user(screen_name=screen_name)
+    return twtr_api.get_user(screen_name=screen_name)
 
 
-def get_follower_id_pages(user_id: int) -> Generator[Iterable[int], None, None]:
-    """"""
-    for loop_num, follower_page in enumerate(tweepy.Cursor(TW_API.followers_ids, user_id=user_id).pages()):
+def get_follower_id_pages(twtr_api: tweepy.API, user_id: int) -> Generator[Iterable[int], None, None]:
+    """Requires app authentication"""
+    for loop_num, follower_page in enumerate(tweepy.Cursor(twtr_api.followers_ids, user_id=user_id).pages()):
         print("Requested follower page #", loop_num+1, sep="")
         yield follower_page
 
 
-def get_follower_ids(user_id: bool) -> Generator[int, None, None]:
-    """"""
-    for follower_page in get_follower_id_pages(user_id):
+def get_follower_ids(twtr_api: tweepy.API, user_id: bool) -> Generator[int, None, None]:
+    """Requires app authentication"""
+    for follower_page in get_follower_id_pages(twtr_api, user_id):
         for follower_id in follower_page:
             yield follower_id
 
 
-def get_followed_id_pages(user_id: int) -> Generator[List[int], None, None]:
-    """"""
-    for loop_num, followed_page in enumerate(tweepy.Cursor(TW_API.friends_ids, user_id=user_id).pages()):
+def get_followed_id_pages(twtr_api: tweepy.API, user_id: int) -> Generator[List[int], None, None]:
+    """Requires app authentication"""
+    for loop_num, followed_page in enumerate(tweepy.Cursor(twtr_api.friends_ids, user_id=user_id).pages()):
         print("Requested followed page #", loop_num+1, sep="")
         yield followed_page
 
 
-def get_followed_ids(user_id: int) -> Generator[int, None, None]:
-    """"""
-    for followed_page in get_followed_id_pages(user_id):
+def get_followed_ids(twtr_api: tweepy.API, user_id: int) -> Generator[int, None, None]:
+    """Requires app authentication"""
+    for followed_page in get_followed_id_pages(twtr_api, user_id):
         for followed_id in followed_page:
             yield followed_id
 
 
-def get_blocked_id_pages() -> Generator[List[int], None, None]:
-    """"""
-    for loop_num, blocked_page in enumerate(tweepy.Cursor(TW_API.blocks_ids, skip_status=True, include_entities=False).pages()):
+def get_blocked_id_pages(authd_usr: tweepy.API) -> Generator[List[int], None, None]:
+    """Requires user authentication"""
+    for loop_num, blocked_page in enumerate(tweepy.Cursor(authd_usr.blocks_ids, skip_status=True, include_entities=False).pages()):
         print("Requested blocked page #", loop_num+1, sep="")
         yield blocked_page
 
 
-def update_blocklist(db_session: Session, force: bool = False) -> None:
-    """"""
+def update_blocklist(authd_usr: tweepy.API, db_session: Session, force: bool = False) -> None:
+    """Requires user authentication"""
     last_update_row = Metadata.get_row("last_blocklist_update", db_session, "0")
     min_delay = 3600 # wait at least an hour before updating blocklist
     last_update_time = float(last_update_row.val)
@@ -199,7 +185,7 @@ def update_blocklist(db_session: Session, force: bool = False) -> None:
     print("Updating account's blocklist, this might take a while...")
     import_history = []
     imported_blocks_total = 0
-    for blocked_id_page in get_blocked_id_pages():
+    for blocked_id_page in get_blocked_id_pages(authd_usr):
         imported_blocks_page = 0
         for blocked_id in blocked_id_page:
             matching_id_query = db_session.query(BlockList).filter(BlockList.user_id == blocked_id)
@@ -246,7 +232,7 @@ def enqueue_block(user_id: int, block_reason: str, db_session: Session, history_
     return queued_block, 0
 
 
-def block_followers_of(target_user: User, db_session: Session,
+def block_followers_of(authd_usr: tweepy.API, target_user: User, db_session: Session,
                        block_followers: bool = True, block_target: bool = True,
                        block_following: bool = False,
                        whitelisted_accounts: Optional[List[int]] = None) -> int:
@@ -276,7 +262,7 @@ def block_followers_of(target_user: User, db_session: Session,
     #FIXME: remove unblocks from UnblockQueue and update the reason in BlockList
     if block_followers:
         block_reason = f"follower_of:{target_user.id}"
-        for followers_page in get_follower_id_pages(target_user.id):
+        for followers_page in get_follower_id_pages(authd_usr, target_user.id):
             enqueued_blocks = []
             for follower_id in followers_page:
                 new_block = enqueue_block(
@@ -294,7 +280,7 @@ def block_followers_of(target_user: User, db_session: Session,
 
     if block_following:
         block_reason = f"followed_by:{target_user.id}"
-        for followed_page in get_followed_id_pages(target_user.id):
+        for followed_page in get_followed_id_pages(authd_usr, target_user.id):
             enqueued_blocks = []
             for followed_id in followed_page:
                 new_block = enqueue_block(
