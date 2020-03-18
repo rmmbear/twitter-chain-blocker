@@ -13,8 +13,6 @@ from sqlalchemy.orm import sessionmaker
 
 from chainblocker import *
 
-from . import config
-
 LOGGER = logging.getLogger(__name__)
 
 ARGPARSER = ArgumentParser(prog="chainblocker")
