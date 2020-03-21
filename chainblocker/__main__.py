@@ -30,26 +30,34 @@ ARGPARSER.add_argument("--block-targets-followed", action="store_true",
 #TODO: implement show_user_info -just pretty print the User object + number of blocked users + block reason
 #TODO: implement session comments, with the default comment being the time of the session's start
 
-def get_workdir() -> Path:
+def get_workdirs() -> dict:
     """"""
+    paths = {}
     dirname = "Twitter Chainblocker"
-    # do not clutter people's home dir
+    home = Path.home()
+    # do not clutter up people's home dir
     if os.name == "posix":
-        return Path.home() / f".local/share/{dirname}"
+        paths["data"] = home / f".local/share/{dirname}"
+        paths["config"] = home / f".config/{dirname}"
+        return paths
 
-    return Path.home() / dirname
+    if os.name == "nt":
+        home = Path(os.path.expandvars("%APPDATA%"))
+        paths["data"] = home / f"Local/{dirname}/data"
+        paths["config"] = home / f"Local/{dirname}/config"
+        return paths
+
+    paths["data"] = home / f"{dirname}/data"
+    paths["config"] = home / f"{dirname}/config"
+    return paths
 
 
-WORKING_DIR = get_workdir()
-WORKING_DIR.mkdir(exist_ok=True)
-
-
-def main(args: Optional[str] = None) -> None:
+def main(args: Optional[str] = None, paths: dict) -> None:
     """"""
     args = ARGPARSER.parse_args(args)
     current_user = AuthedUser.authenticate_interactive()
 
-    dbfile = WORKING_DIR / f"{current_user.user.id}_blocklist.sqlite"
+    dbfile = paths["data"] / f"{current_user.user.id}_blocklist.sqlite"
     sqla_engine = sqla.create_engine(f"sqlite:///{str(dbfile)}", echo=False)
     BlocklistDBBase.metadata.create_all(sqla_engine)
     bound_session = sessionmaker(bind=sqla_engine)
@@ -106,7 +114,11 @@ def main(args: Optional[str] = None) -> None:
 
 
 if __name__ == "__main__":
-    FH = logging.FileHandler(WORKING_DIR / "chainblocker.log", mode="w")
+    PATHS = get_workdirs()
+    for directory in PATHS.values():
+        directory.mkdir(exist_ok=True)
+
+    FH = logging.FileHandler(PATHS["data"] / "chainblocker.log", mode="w")
     FH.setLevel(logging.DEBUG)
     FH.setFormatter(logging.Formatter("[%(levelname)s] %(asctime)s: %(message)s"))
     LOGGER.addHandler(FH)
@@ -116,7 +128,7 @@ if __name__ == "__main__":
         # ignore argparse-issued systemexit
         if not isinstance(exc, SystemExit):
             LOGGER.exception("UNCAUGHT EXCEPTION:")
-            exception_log = WORKING_DIR / time.strftime("chainblocker_exception_%Y-%m-%dT_%H-%M-%S.log")
+            exception_log = PATHS["data"] / time.strftime("chainblocker_exception_%Y-%m-%dT_%H-%M-%S.log")
             shutil.copy(FH.baseFilename, exception_log)
             print("Chainblocker quit due to unexpected error!")
             print(f"Error: {exc}")
