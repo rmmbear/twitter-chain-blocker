@@ -118,6 +118,22 @@ class TopQueue(BlocklistDBBase):
 
 class AuthedUser:
     """"""
+    # Note that inclusion of api keys below is intentional
+    # even desktop apps must use twitter's api keys for authentication,
+    # meaning that the only options for me are:
+    # 1. Create and maintain some sort of proxy authentication server
+    # 2. Include the keys in source code
+    # time and effort spent on implementing #1 is in my opinion not worth it
+    # the keys are tied to an account created only for the purposes of this project
+
+    # If you're here to use these keys for nefarious purposes:
+    # Hi! please don't go overboard with it :)
+    keys = (
+        "y67bCUPU1TKtwnQZdCsG2MuX9",
+        "Sf1SBuK0RPnSw6SwbySrEMxa9"
+        "RmjDStZZ2dZHk0N1ufHMHDeZZ"
+    )
+
     def __init__(self, auth: tweepy.OAuthHandler):
         """"""
         self._user_obj = None
@@ -133,25 +149,23 @@ class AuthedUser:
             retry_count=5, retry_delay=20,
             retry_errors=[500, 502, 503, 504],
         )
+        self.rate_limits = self.api.rate_limit_status()
+
+
+    @classmethod
+    def authenticate(cls, key: str, secret: str, auth_handler: tweepy.OAuthHandler = None) -> "AuthedUser":
+        """"""
+        if not auth_handler:
+            auth_handler = tweepy.OAuthHandler(*cls.keys)
+
+        auth_handler.set_access_token(key, secret)
+        return cls(auth_handler)
 
 
     @classmethod
     def authenticate_interactive(cls) -> "AuthedUser":
         """"""
-        # Note that inclusion of api keys below is intentional
-        # even desktop apps must use twitter's api keys for authentication,
-        # meaning that the only options for me are:
-        # 1. Create and maintain some sort of proxy authentication server
-        # 2. Include the keys in source code
-        # time and effort spent on implementing #1 is in my opinion not worth it
-        # the keys are tied to an account created only for the purposes of this project
-
-        # If you're here to use these keys for nefarious purposes:
-        # Hi! please don't go overboard with it :)
-        auth_handler = tweepy.OAuthHandler(
-            "y67bCUPU1TKtwnQZdCsG2MuX9",
-            "Sf1SBuK0RPnSw6SwbySrEMxa9"
-            "RmjDStZZ2dZHk0N1ufHMHDeZZ")
+        auth_handler = tweepy.OAuthHandler(*cls.keys)
         #TODO: implement key override - allow people to use their own keys for app-auth
         auth_url = auth_handler.get_authorization_url()
         print(f"Authnetication is required before we can continue.")
