@@ -1,5 +1,6 @@
 """"""
 import os
+import sys
 import time
 import shutil
 import logging
@@ -96,8 +97,22 @@ def get_workdirs() -> dict:
 def main(paths: dict, args: Optional[str] = None) -> None:
     """"""
     args = ARGPARSER.parse_args(args)
+    args.mode = args.mode[0].split("+")
+    if len(args.mode) > 3:
+        sys.exit("ERROR: Received more than three targes for --mode\n"
+                 "(only accepting 'target', 'followers' and 'followed')")
+
+    unknown_mode = set(args.mode) - set(("target", "followers", "followed"))
+    if unknown_mode:
+        sys.exit(f"ERROR: {unknown_mode}: invalid --mode\n"
+                 "(only accepting 'target', 'followers' and 'followed')")
+
+    args.affect_target = "target" in args.mode
+    args.affect_followers = "followers" in args.mode
+    args.affect_followed = "followed" in args.mode
+
     #FIXME: implement all arguments
-    NOT_IMPLEMENTED = ["unblocks_first", "only_queue_action", "mode", "comment"]
+    NOT_IMPLEMENTED = ["unblocks_first", "only_queue_action", "comment"]
     for missing in NOT_IMPLEMENTED:
         if getattr(args, missing, None):
             raise NotImplementedError(f"'{missing}' is not yet implemented")
@@ -125,7 +140,7 @@ def main(paths: dict, args: Optional[str] = None) -> None:
         print(f"{name} : {count}")
 
     print()
-
+    #TODO: add confirmation dialogues for blocking and unblocking
     blocks_queued = 0
     try:
         clean_exit = Metadata.get_row("clean_exit", db_session, "1")
@@ -137,24 +152,23 @@ def main(paths: dict, args: Optional[str] = None) -> None:
             pass
 
         if args.command == "block":
+            if not args.skip_blocklist_update and not args.only_queue_action:
+            update_blocklist(current_user, db_session)
+
             print("getting authenticated user's follows...")
             authenticated_user_follows = [x for x in current_user.get_followed_ids(current_user.user.id)]
-            if not args.skip_blocklist_update:
-                update_blocklist(current_user, db_session)
-
-            #TODO: add confirmation dialogues for blocking and unblocking
 
             for account_name in args.accounts:
                 target_user = current_user.get_user(screen_name=account_name)
                 LOGGER.info("Queueing blocks for followers of USER=%s ID=%s", target_user.screen_name, target_user.id)
                 blocks_queued += block_followers_of(
                     authed_usr=current_user, target_user=target_user, db_session=db_session,
-                    block_followers=(not args.dont_block_followers), block_target=(not args.dont_block_target),
-                    block_following=(args.block_targets_followed), whitelisted_accounts=authenticated_user_follows)
+                    block_followers=args.affect_followers, block_target=args.affect_target,
+                    block_following=args.affect_followed, whitelisted_accounts=authenticated_user_follows)
 
             print(f"Added {blocks_queued} new accounts to block queue")
 
-        if not args.only_queue_accounts:
+        if not args.only_queue_accounts and not args.only_queue_actions:
             print("Processing block queue")
             process_block_queue(current_user, db_session, authenticated_user_follows)
         Metadata.set_row("clean_exit", 1, db_session)
