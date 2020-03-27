@@ -264,7 +264,7 @@ def update_blocklist(authed_usr: AuthedUser, db_session: Session, force: bool = 
         for blocked_id in blocked_id_page:
             matching_id_query = db_session.query(BlockList).filter(BlockList.user_id == blocked_id)
             if not db_session.query(matching_id_query.exists()).scalar():
-                db_session.add(BlockList(user_id=blocked_id, reason="unknown"))
+                db_session.add(BlockList(user_id=blocked_id, reason="unknown:unknown"))
                 imported_blocks_page += 1
 
         import_history.append(imported_blocks_page)
@@ -546,6 +546,7 @@ def db_maintenance(db_session: Session) -> None:
     last_user_id = 0
     block_queue_query = db_session.query(BlockQueue).filter(BlockQueue.user_id > last_user_id).order_by(BlockQueue.user_id)
     LOGGER.info("Cleaning up block queue...")
+    print("Cleaning up block queue...")
     while db_session.query(block_queue_query.exists()).scalar():
         for queued_block in block_queue_query.limit(1000).all():
             last_user_id = queued_block.user_id

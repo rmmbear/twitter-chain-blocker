@@ -32,12 +32,12 @@ ARGPARSER.add_argument(
     "--only-queue-accounts", action="store_true",
     help="Delay queue processing until next run and only queue accounts for blocking/unblocking.")
 ARGPARSER.add_argument(
-    "--only-queue-action", action="store_true",
+    "--only-queue-actions", action="store_true",
     help="Delay queueing accounts until next run and only store which actions to perform. "
          "Useful if you want to issue different commands one after another, and don't want to wait for account queueing. "
          "This option also disables blocklist update")
 ARGPARSER.add_argument(
-    "--mode", nargs=1, type=str, default="target+followers",
+    "--mode", nargs=1, type=str, default=["target+followers"],
     help="Set which parties will be affected in current batch of accounts. "
          "Options must be delimited with a '+' symbol. Possible options are: "
          "target = the account named, followers = target's followers, followed = people followed by target. "
@@ -65,7 +65,7 @@ ARGP_UNBLOCK.add_argument(
     help="List of screen names of accounts you wish to unblock.")
 ARGP_REASON = ARGP_COMMANDS.add_parser("reason", help="Check if you are blocking someone and display details of that block")
 ARGP_REASON.add_argument(
-    "account_name", nargs=1,
+    "account_name", nargs=1, type=str,
     help="Screen name of the account you want to query")
 
 
@@ -112,7 +112,7 @@ def main(paths: dict, args: Optional[str] = None) -> None:
     args.affect_followed = "followed" in args.mode
 
     #FIXME: implement all arguments
-    NOT_IMPLEMENTED = ["unblocks_first", "only_queue_action", "comment"]
+    NOT_IMPLEMENTED = ["unblocks_first", "only_queue_actions", "comment"]
     for missing in NOT_IMPLEMENTED:
         if getattr(args, missing, None):
             raise NotImplementedError(f"'{missing}' is not yet implemented")
@@ -120,9 +120,6 @@ def main(paths: dict, args: Optional[str] = None) -> None:
     #FIXME: implement unblocking
     if args.command == "unblock":
         raise NotImplementedError(f"unblocking is not yet implemented")
-    #FIXME: implement reason
-    if args.command == "reason":
-        raise NotImplementedError(f"reason is not yet implemented")
 
     current_user = AuthedUser.authenticate_interactive()
 
@@ -146,14 +143,42 @@ def main(paths: dict, args: Optional[str] = None) -> None:
         clean_exit = Metadata.get_row("clean_exit", db_session, "1")
         if clean_exit.val == "0":
             LOGGER.warning("Exception encountered in last session, performing maintenance")
+            print("Exception encountered in last session, performing maintenance")
             db_maintenance(db_session)
+
+        if args.command == "reason":
+            reason_string = \
+                "User: {} (ID={})\n" \
+                "Status: {}\n" \
+                "Reason: {}\n" \
+                #"Comment: {session_comment}\n"
+            twitter_user = current_user.get_user(screen_name=args.account_name[0])
+            block_row = db_session.query(BlockList).filter(BlockList.user_id == twitter_user.id).one_or_none()
+            if not block_row:
+                reason_string = reason_string.format(
+                    twitter_user.screen_name, twitter_user.id, "Not in local block database!", "---")
+            else:
+                reason_chain, reason_id = block_row.reason.split(":")
+                if reason_chain == "target":
+                    reason_full = "First in chain (blocking target)"
+                elif reason_chain == "unknown":
+                    reason_full = "Unknown, this block was not made using chainblocker"
+                else:
+                    reason_user = current_user.get_user(int(reason_id))
+                    reason_full = f"{reason_chain.replace('_', ' ' )} {reason_user.screen_name} (ID={reason_id})"
+                reason_string = reason_string.format(
+                    twitter_user.screen_name, twitter_user.id,
+                    time.strftime("Blocked on %Y/%m/%d %H:%M:%S", time.localtime(block_row.block_time)) if block_row.block_time else "Blocked on ???",
+                    reason_full)
+
+            print(reason_string)
 
         if args.command == "unblock":
             pass
 
         if args.command == "block":
             if not args.skip_blocklist_update and not args.only_queue_action:
-            update_blocklist(current_user, db_session)
+                update_blocklist(current_user, db_session)
 
             print("getting authenticated user's follows...")
             authenticated_user_follows = [x for x in current_user.get_followed_ids(current_user.user.id)]
@@ -168,9 +193,10 @@ def main(paths: dict, args: Optional[str] = None) -> None:
 
             print(f"Added {blocks_queued} new accounts to block queue")
 
-        if not args.only_queue_accounts and not args.only_queue_actions:
+        if not args.only_queue_accounts and not args.only_queue_actions and args.command != "reason":
             print("Processing block queue")
             process_block_queue(current_user, db_session, authenticated_user_follows)
+
         Metadata.set_row("clean_exit", 1, db_session)
     except:
         LOGGER.error("Uncaught exception, rolling back db session")
