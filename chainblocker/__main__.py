@@ -132,11 +132,6 @@ def main(paths: dict, args: Optional[str] = None) -> None:
     session_start = time.time()
     db_session = bound_session()
 
-    print("Current blocklist statistics:")
-    for name, count in chainblocker.blocks_status(db_session).items():
-        print(f"{name} : {count}")
-
-    print()
     #TODO: add confirmation dialogues for blocking and unblocking
     blocks_queued = 0
     try:
@@ -145,6 +140,13 @@ def main(paths: dict, args: Optional[str] = None) -> None:
             LOGGER.warning("Exception encountered in last session, performing maintenance")
             print("Exception encountered in last session, performing maintenance")
             chainblocker.db_maintenance(db_session)
+
+        print("Current blocklist statistics:")
+        for name, count in chainblocker.blocks_status(db_session).items():
+            print(f"{name} : {count}")
+
+        print()
+
 
         if args.command == "reason":
             reason_string = \
