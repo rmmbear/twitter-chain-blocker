@@ -163,25 +163,6 @@ class AuthedUser:
         auth_handler.set_access_token(key, secret)
         return cls(auth_handler)
 
-
-    @classmethod
-    def authenticate_interactive(cls) -> "AuthedUser":
-        """"""
-        auth_handler = tweepy.OAuthHandler(*cls.keys)
-        #TODO: implement key override - allow people to use their own keys for app-auth
-        auth_url = auth_handler.get_authorization_url()
-        print(f"Authnetication is required before we can continue.")
-        print(f"Please go to the following url and authorize the app")
-        print(f"{auth_url}")
-        auth_pin = input("Please paste the PIN here: ").strip()
-        #FIXME: perform error-checking, check input
-        access_token = auth_handler.get_access_token(auth_pin)
-        auth_handler.set_access_token(*access_token)
-        authed_user = cls(auth_handler)
-        print(f"Authentication successful for user '{authed_user.user.screen_name}'\n")
-        return authed_user
-
-
     @property
     def user(self) -> User:
         """Return tweepy User object representation of authenticated user."""
