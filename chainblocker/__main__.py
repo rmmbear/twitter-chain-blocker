@@ -10,7 +10,7 @@ from pathlib import Path
 from argparse import ArgumentParser
 
 import sqlalchemy as sqla
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker, Session
 
 import chainblocker
 
@@ -117,10 +117,6 @@ def main(paths: dict, args: Optional[str] = None) -> None:
         if getattr(args, missing, None):
             raise NotImplementedError(f"'{missing}' is not yet implemented")
 
-    #FIXME: implement unblocking
-    if args.command == "unblock":
-        raise NotImplementedError(f"unblocking is not yet implemented")
-
     current_user = chainblocker.AuthedUser.authenticate_interactive()
 
     dbfile = paths["data"] / f"{current_user.user.id}_blocklist.sqlite"
@@ -147,57 +143,26 @@ def main(paths: dict, args: Optional[str] = None) -> None:
 
         print()
 
-
         if args.command == "reason":
-            reason_string = \
-                "User: {} (ID={})\n" \
-                "Status: {}\n" \
-                "Reason: {}\n" \
-                #"Comment: {session_comment}\n"
-            twitter_user = current_user.get_user(screen_name=args.account_name[0])
-            block_row = db_session.query(chainblocker.BlockList).filter(chainblocker.BlockList.user_id == twitter_user.id).one_or_none()
-            if not block_row:
-                reason_string = reason_string.format(
-                    twitter_user.screen_name, twitter_user.id, "Not in local block database!", "---")
-            else:
-                reason_chain, reason_id = block_row.reason.split(":")
-                if reason_chain == "target":
-                    reason_full = "First in chain (blocking target)"
-                elif reason_chain == "unknown":
-                    reason_full = "Unknown, this block was not made using chainblocker"
-                else:
-                    reason_user = current_user.get_user(int(reason_id))
-                    reason_full = f"{reason_chain.replace('_', ' ' )} {reason_user.screen_name} (ID={reason_id})"
-                reason_string = reason_string.format(
-                    twitter_user.screen_name, twitter_user.id,
-                    time.strftime("Blocked on %Y/%m/%d %H:%M:%S", time.localtime(block_row.block_time)) if block_row.block_time else "Blocked on ???",
-                    reason_full)
-
-            print(reason_string)
+            reason(target_user=args.account_name, authed_user=current_user, db_session=db_session)
 
         if args.command == "unblock":
-            pass
+            for unblock_target in args.account:
+                unblock(target_user=unblock_target, authed_user=current_user, db_session=db_session,
+                        affect_target=args.affect_target, affect_followers=args.affect_followers,
+                        affect_followed=args.affect_followed)
 
         if args.command == "block":
             if not args.skip_blocklist_update and not args.only_queue_action:
                 chainblocker.update_blocklist(current_user, db_session)
-
-            print("getting authenticated user's follows...")
-            authenticated_user_follows = [x for x in current_user.get_followed_ids(current_user.user.id)]
-
-            for account_name in args.accounts:
-                target_user = current_user.get_user(screen_name=account_name)
-                LOGGER.info("Queueing blocks for followers of USER=%s ID=%s", target_user.screen_name, target_user.id)
-                blocks_queued += chainblocker.queue_blocks_for(
-                    target_user=target_user, authed_usr=current_user, db_session=db_session,
-                    block_followers=args.affect_followers, block_target=args.affect_target,
-                    block_following=args.affect_followed, whitelisted_accounts=authenticated_user_follows)
-
-            print(f"Added {blocks_queued} new accounts to block queue")
+            for block_target in args.accounts:
+                block(target_user=args.block_target, authed_user=current_user, db_session=db_session,
+                      affect_target=args.affect_target, affect_followers=args.affect_followers,
+                      affect_followed=args.affect_followed)
 
         if not args.only_queue_accounts and not args.only_queue_actions and args.command != "reason":
             print("Processing block queue")
-            chainblocker.process_block_queue(current_user, db_session, authenticated_user_follows)
+            chainblocker.process_block_queue(current_user, db_session)
 
         chainblocker.Metadata.set_row("clean_exit", 1, db_session)
     except:
@@ -208,6 +173,59 @@ def main(paths: dict, args: Optional[str] = None) -> None:
     finally:
         LOGGER.info("Closing db session")
         db_session.close()
+
+
+def reason(target_user: str, authed_user: chainblocker.AuthedUser, db_session: Session) -> None:
+    """"""
+    reason_string = \
+        "User: {} (ID={})\n" \
+        "Status: {}\n" \
+        "Reason: {}\n" \
+        #"Comment: {session_comment}\n"
+    twitter_user = authed_user.get_user(screen_name=target_user)
+    block_row = db_session.query(chainblocker.BlockList).filter(chainblocker.BlockList.user_id == twitter_user.id).one_or_none()
+    if not block_row:
+        reason_string = reason_string.format(
+            twitter_user.screen_name, twitter_user.id, "Not in local block database!", "---")
+    else:
+        reason_chain, reason_id = block_row.reason.split(":")
+        if reason_chain == "target":
+            reason_full = "First in chain (blocking target)"
+        elif reason_chain == "unknown":
+            reason_full = "Unknown, this block was not made using chainblocker"
+        else:
+            reason_user = authed_user.get_user(int(reason_id))
+            reason_full = f"{reason_chain.replace('_', ' ' )} {reason_user.screen_name} (ID={reason_id})"
+        reason_string = reason_string.format(
+            twitter_user.screen_name, twitter_user.id,
+            time.strftime("Blocked on %Y/%m/%d %H:%M:%S", time.localtime(block_row.block_time)) if block_row.block_time else "Blocked on ???",
+            reason_full)
+
+    print(reason_string)
+
+
+def block(target_user: str, authed_user: chainblocker.AuthedUser, db_session: Session,
+          affect_target: bool = True, affect_followers: bool = True,
+          affect_followed: bool = False) -> None:
+    """"""
+    print("getting authenticated user's follows...")
+
+    target_user = authed_user.get_user(screen_name=target_user)
+    LOGGER.info("Queueing blocks for followers of USER=%s ID=%s", target_user.screen_name, target_user.id)
+    blocks_queued = chainblocker.queue_blocks_for(
+        target_user=target_user, authed_user=authed_user, db_session=db_session,
+        block_followers=affect_followers, block_target=affect_target,
+        block_following=affect_followed)
+
+    print(f"Added {blocks_queued} new accounts to block queue")
+
+
+def unblock(target_user: str, authed_user: chainblocker.AuthedUser, db_session: Session,
+            affect_target: bool = True, affect_followers: bool = True,
+            affect_followed: bool = False) -> None:
+    """"""
+    #FIXME: implement unblocking
+    raise NotImplementedError()
 
 
 if __name__ == "__main__":
