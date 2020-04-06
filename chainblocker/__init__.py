@@ -15,9 +15,9 @@ from sqlalchemy.ext.declarative import declarative_base
 __all__ = [
     "AuthedUser", "BlockHistory", "BlockList", "BlockQueue",
     "BlocklistDBBase", "Metadata", "TopQueue", "UnblockQueue",
-    "block_followers_of", "blocks_status", "db_maintenance",
-    "declarative_base", "enqueue_block", "process_block_queue",
-    "unblock_followers_of", "update_blocklist",
+    "blocks_status", "db_maintenance", "declarative_base",
+    "enqueue_block", "process_block_queue", "queue_blocks_for",
+    "queue_unblocks_for", "update_blocklist",
     ]
 
 
@@ -306,10 +306,10 @@ def enqueue_block(user_id: int, block_reason: str, db_session: Session, history_
     return queued_block, 0
 
 
-def block_followers_of(authed_usr: AuthedUser, target_user: User, db_session: Session,
-                       block_followers: bool = True, block_target: bool = True,
-                       block_following: bool = False,
-                       whitelisted_accounts: Optional[List[int]] = None) -> int:
+def queue_blocks_for(target_user: User, authed_usr: AuthedUser, db_session: Session,
+                     block_target: bool = True, block_followers: bool = True,
+                     block_following: bool = False,
+                     whitelisted_accounts: Optional[List[int]] = None) -> int:
     """"""
     if not (block_followers or block_target or block_following):
         raise RuntimeError("Bad arguments - no blocks will be queued")
@@ -332,6 +332,16 @@ def block_followers_of(authed_usr: AuthedUser, target_user: User, db_session: Se
         time=time_start, queued=0, skipped_blocked=0, skipped_queued=0, skipped_following=0)
 
     db_session.add(block_history)
+
+    if block_target:
+        block_reason = f"target:{target_user.id}"
+        new_block = enqueue_block(
+            target_user.id, block_reason, db_session, history_object=block_history,
+            whitelisted_accounts=whitelisted_accounts)
+
+        if new_block[0]:
+            db_session.add(new_block[0])
+            db_session.commit()
 
     #FIXME: remove unblocks from UnblockQueue and update the reason in BlockList
     if block_followers:
@@ -370,16 +380,6 @@ def block_followers_of(authed_usr: AuthedUser, target_user: User, db_session: Se
             db_session.add_all(enqueued_blocks)
             db_session.commit()
 
-    if block_target:
-        block_reason = f"target:{target_user.id}"
-        new_block = enqueue_block(
-            target_user.id, block_reason, db_session, history_object=block_history,
-            whitelisted_accounts=whitelisted_accounts)
-
-        if new_block[0]:
-            db_session.add(new_block[0])
-            db_session.commit()
-
     if block_history.queued == 0:
         db_session.delete(block_history)
         db_session.commit()
@@ -400,33 +400,34 @@ def block_followers_of(authed_usr: AuthedUser, target_user: User, db_session: Se
     return block_history.queued
 
 
-def unblock_followers_of(target_user: User, db_session: Session,
-                         unblock_followers: bool = True, unblock_target: bool = True,
-                         unblock_following: bool = False) -> int:
+def queue_unblocks_for(target_user_id: str, db_session: Session,
+                       unblock_target: bool = True, unblock_followers: bool = True,
+                       unblock_following: bool = False) -> int:
     """"""
     reasons = []
-
-    if unblock_followers:
-        reasons.append(f"follower_of:{target_user.id}")
     if unblock_target:
-        reasons.append(f"target:{target_user.id}")
+        reasons.append(f"target:{target_user_id}")
+    if unblock_followers:
+        reasons.append(f"follower_of:{target_user_id}")
     if unblock_following:
-        reasons.append(f"followed_by:{target_user.id}")
+        reasons.append(f"followed_by:{target_user_id}")
 
+    # remove blocks from the queue
     block_queue_query = db_session.query(BlockQueue).filter(BlockQueue.reason in reasons)
-    pending_block_queue = block_queue_query.count()
-    if pending_block_queue:
-        print(f"Removing {pending_block_queue} blocks from the queue")
+    cancelled_blocks_count = block_queue_query.count()
+    if cancelled_blocks_count:
+        print(f"Removing {cancelled_blocks_count} blocks from the queue")
         block_queue_query.delete()
         db_session.commit()
 
+    # actual unblock queueing happens here
     block_list_query = db_session.query(BlockList).filter(BlockQueue.reason in reasons)
-    pending_block_list = block_list_query.count()
-    if pending_block_list:
-        print(f"Queueing unblocks for {pending_block_list} users")
+    matching_blocks_count = block_list_query.count()
+    if matching_blocks_count:
+        print(f"Queueing unblocks for {matching_blocks_count} users")
         while db_session.query(block_list_query.exists()).scalar():
             new_unblocks = []
-            for blocked_user in block_queue_query.limit(500).all():
+            for blocked_user in block_list_query.limit(500).all():
                 unblock = UnblockQueue(
                     user_id=blocked_user.id, queued_at=time.time(), reason=blocked_user.reason)
                 new_unblocks.append(unblock)
@@ -435,15 +436,20 @@ def unblock_followers_of(target_user: User, db_session: Session,
             db_session.add_all(new_unblocks)
             db_session.commit()
 
-    if not pending_block_queue and not pending_block_list:
+    if cancelled_blocks_count + matching_blocks_count == 0:
         print("Did not find any accounts to unblock")
-        return pending_block_list
+        return 0
 
-    print(f"Cancelled {pending_block_queue} blocks")
-    print(f"Queued {pending_block_list} unblocks")
-    return pending_block_list
+    print(f"Cancelled {cancelled_blocks_count} blocks")
+    print(f"Queued {matching_blocks_count} unblocks")
+    return matching_blocks_count + cancelled_blocks_count
 
     #FIXME: remove target_user from metaqueue
+    # if the target user is in the top queue, modify the top queue order's mode
+    # based on arguments passed to this function
+    # mode = set(order.mode.split(":", maxsplit=1)[-1].split()) - set(target, followers, followed)
+    # if not mode: remove order from top queue
+    # else: order.mode = f"block:{'+'.join(mode)}"
 
 
 def process_block_queue(authed_usr: AuthedUser, db_session: Session,

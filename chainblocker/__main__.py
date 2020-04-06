@@ -12,7 +12,7 @@ from argparse import ArgumentParser
 import sqlalchemy as sqla
 from sqlalchemy.orm import sessionmaker
 
-from chainblocker import *
+import chainblocker
 
 LOGGER = logging.getLogger(__name__)
 
@@ -121,11 +121,11 @@ def main(paths: dict, args: Optional[str] = None) -> None:
     if args.command == "unblock":
         raise NotImplementedError(f"unblocking is not yet implemented")
 
-    current_user = AuthedUser.authenticate_interactive()
+    current_user = chainblocker.AuthedUser.authenticate_interactive()
 
     dbfile = paths["data"] / f"{current_user.user.id}_blocklist.sqlite"
     sqla_engine = sqla.create_engine(f"sqlite:///{str(dbfile)}", echo=False)
-    BlocklistDBBase.metadata.create_all(sqla_engine)
+    chainblocker.BlocklistDBBase.metadata.create_all(sqla_engine)
     bound_session = sessionmaker(bind=sqla_engine)
 
     LOGGER.info("Creating new db session")
@@ -133,18 +133,18 @@ def main(paths: dict, args: Optional[str] = None) -> None:
     db_session = bound_session()
 
     print("Current blocklist statistics:")
-    for name, count in blocks_status(db_session).items():
+    for name, count in chainblocker.blocks_status(db_session).items():
         print(f"{name} : {count}")
 
     print()
     #TODO: add confirmation dialogues for blocking and unblocking
     blocks_queued = 0
     try:
-        clean_exit = Metadata.get_row("clean_exit", db_session, "1")
+        clean_exit = chainblocker.Metadata.get_row("clean_exit", db_session, "1")
         if clean_exit.val == "0":
             LOGGER.warning("Exception encountered in last session, performing maintenance")
             print("Exception encountered in last session, performing maintenance")
-            db_maintenance(db_session)
+            chainblocker.db_maintenance(db_session)
 
         if args.command == "reason":
             reason_string = \
@@ -153,7 +153,7 @@ def main(paths: dict, args: Optional[str] = None) -> None:
                 "Reason: {}\n" \
                 #"Comment: {session_comment}\n"
             twitter_user = current_user.get_user(screen_name=args.account_name[0])
-            block_row = db_session.query(BlockList).filter(BlockList.user_id == twitter_user.id).one_or_none()
+            block_row = db_session.query(chainblocker.BlockList).filter(chainblocker.BlockList.user_id == twitter_user.id).one_or_none()
             if not block_row:
                 reason_string = reason_string.format(
                     twitter_user.screen_name, twitter_user.id, "Not in local block database!", "---")
@@ -178,7 +178,7 @@ def main(paths: dict, args: Optional[str] = None) -> None:
 
         if args.command == "block":
             if not args.skip_blocklist_update and not args.only_queue_action:
-                update_blocklist(current_user, db_session)
+                chainblocker.update_blocklist(current_user, db_session)
 
             print("getting authenticated user's follows...")
             authenticated_user_follows = [x for x in current_user.get_followed_ids(current_user.user.id)]
@@ -186,8 +186,8 @@ def main(paths: dict, args: Optional[str] = None) -> None:
             for account_name in args.accounts:
                 target_user = current_user.get_user(screen_name=account_name)
                 LOGGER.info("Queueing blocks for followers of USER=%s ID=%s", target_user.screen_name, target_user.id)
-                blocks_queued += block_followers_of(
-                    authed_usr=current_user, target_user=target_user, db_session=db_session,
+                blocks_queued += chainblocker.queue_blocks_for(
+                    target_user=target_user, authed_usr=current_user, db_session=db_session,
                     block_followers=args.affect_followers, block_target=args.affect_target,
                     block_following=args.affect_followed, whitelisted_accounts=authenticated_user_follows)
 
@@ -195,13 +195,13 @@ def main(paths: dict, args: Optional[str] = None) -> None:
 
         if not args.only_queue_accounts and not args.only_queue_actions and args.command != "reason":
             print("Processing block queue")
-            process_block_queue(current_user, db_session, authenticated_user_follows)
+            chainblocker.process_block_queue(current_user, db_session, authenticated_user_follows)
 
-        Metadata.set_row("clean_exit", 1, db_session)
+        chainblocker.Metadata.set_row("clean_exit", 1, db_session)
     except:
         LOGGER.error("Uncaught exception, rolling back db session")
         db_session.rollback()
-        Metadata.set_row("clean_exit", 0, db_session)
+        chainblocker.Metadata.set_row("clean_exit", 0, db_session)
         raise
     finally:
         LOGGER.info("Closing db session")
