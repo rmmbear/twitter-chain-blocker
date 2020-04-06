@@ -9,6 +9,7 @@ from typing import Optional
 from pathlib import Path
 from argparse import ArgumentParser
 
+import tweepy
 import sqlalchemy as sqla
 from sqlalchemy.orm import sessionmaker, Session
 
@@ -117,7 +118,7 @@ def main(paths: dict, args: Optional[str] = None) -> None:
         if getattr(args, missing, None):
             raise NotImplementedError(f"'{missing}' is not yet implemented")
 
-    current_user = chainblocker.AuthedUser.authenticate_interactive()
+    current_user = authenticate_interactive()
 
     dbfile = paths["data"] / f"{current_user.user.id}_blocklist.sqlite"
     sqla_engine = sqla.create_engine(f"sqlite:///{str(dbfile)}", echo=False)
@@ -173,6 +174,23 @@ def main(paths: dict, args: Optional[str] = None) -> None:
     finally:
         LOGGER.info("Closing db session")
         db_session.close()
+
+
+def authenticate_interactive() -> chainblocker.AuthedUser:
+    """"""
+    auth_handler = tweepy.OAuthHandler(*chainblocker.AuthedUser.keys)
+    #TODO: implement key override - allow people to use their own keys for app-auth
+    auth_url = auth_handler.get_authorization_url()
+    print(f"Authnetication is required before we can continue.")
+    print(f"Please go to the following url and authorize the app")
+    print(f"{auth_url}")
+    auth_pin = input("Please paste the PIN here: ").strip()
+    #FIXME: perform error-checking, check input
+    access_token = auth_handler.get_access_token(auth_pin)
+    auth_handler.set_access_token(*access_token)
+    authed_user = chainblocker.AuthedUser(auth_handler)
+    print(f"Authentication successful for user '{authed_user.user.screen_name}'\n")
+    return authed_user
 
 
 def reason(target_user: str, authed_user: chainblocker.AuthedUser, db_session: Session) -> None:
