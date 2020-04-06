@@ -137,6 +137,8 @@ class AuthedUser:
     def __init__(self, auth: tweepy.OAuthHandler):
         """"""
         self._user_obj = None
+        self._followed_ids: List[int] = []
+        self._followed_update_time = 0.0
         #TODO: keep track of rate limits
         # call api.rate_limit_status at authorization
         # possibly store rate limit data in db?
@@ -187,6 +189,18 @@ class AuthedUser:
             self._user_obj = self.api.me()
 
         return self._user_obj
+
+
+    @property
+    def followed_ids(self) -> List[int]:
+        """List of users currently followed by autheduser"""
+        # only refresh the list if two hours have passed
+        if self._followed_update_time + (3600 * 2) <= time.time():
+            #this is a necessary use of a comprehension, pylint
+            self._followed_ids = [x for x in self.get_followed_ids(self.user.id)]
+            self._followed_update_time = time.time()
+
+        return self._followed_ids
 
 
     def get_user(self, user_id: Optional[int] = None,
@@ -241,7 +255,7 @@ class AuthedUser:
 
 
 
-def update_blocklist(authed_usr: AuthedUser, db_session: Session, force: bool = False) -> None:
+def update_blocklist(authed_user: AuthedUser, db_session: Session, force: bool = False) -> None:
     """Requires user authentication"""
     last_update_row = Metadata.get_row("last_blocklist_update", db_session, "0")
     min_delay = 3600 # wait at least an hour before updating blocklist
@@ -259,7 +273,7 @@ def update_blocklist(authed_usr: AuthedUser, db_session: Session, force: bool = 
     print("Updating account's blocklist, this might take a while...")
     import_history = []
     imported_blocks_total = 0
-    for blocked_id_page in authed_usr.get_blocked_id_pages():
+    for blocked_id_page in authed_user.get_blocked_id_pages():
         imported_blocks_page = 0
         for blocked_id in blocked_id_page:
             matching_id_query = db_session.query(BlockList).filter(BlockList.user_id == blocked_id)
@@ -306,10 +320,9 @@ def enqueue_block(user_id: int, block_reason: str, db_session: Session, history_
     return queued_block, 0
 
 
-def queue_blocks_for(target_user: User, authed_usr: AuthedUser, db_session: Session,
+def queue_blocks_for(target_user: User, authed_user: AuthedUser, db_session: Session,
                      block_target: bool = True, block_followers: bool = True,
-                     block_following: bool = False,
-                     whitelisted_accounts: Optional[List[int]] = None) -> int:
+                     block_following: bool = False) -> int:
     """"""
     if not (block_followers or block_target or block_following):
         raise RuntimeError("Bad arguments - no blocks will be queued")
@@ -337,7 +350,7 @@ def queue_blocks_for(target_user: User, authed_usr: AuthedUser, db_session: Sess
         block_reason = f"target:{target_user.id}"
         new_block = enqueue_block(
             target_user.id, block_reason, db_session, history_object=block_history,
-            whitelisted_accounts=whitelisted_accounts)
+            whitelisted_accounts=authed_user.followed_ids)
 
         if new_block[0]:
             db_session.add(new_block[0])
@@ -346,12 +359,12 @@ def queue_blocks_for(target_user: User, authed_usr: AuthedUser, db_session: Sess
     #FIXME: remove unblocks from UnblockQueue and update the reason in BlockList
     if block_followers:
         block_reason = f"follower_of:{target_user.id}"
-        for followers_page in authed_usr.get_follower_id_pages(target_user.id):
+        for followers_page in authed_user.get_follower_id_pages(target_user.id):
             enqueued_blocks = []
             for follower_id in followers_page:
                 new_block = enqueue_block(
                     follower_id, block_reason, db_session, history_object=block_history,
-                    whitelisted_accounts=whitelisted_accounts)
+                    whitelisted_accounts=authed_user.followed_ids)
 
                 if not new_block[0]:
                     # row not created, reason noted in block_history object
@@ -364,12 +377,12 @@ def queue_blocks_for(target_user: User, authed_usr: AuthedUser, db_session: Sess
 
     if block_following:
         block_reason = f"followed_by:{target_user.id}"
-        for followed_page in authed_usr.get_followed_id_pages(target_user.id):
+        for followed_page in authed_user.get_followed_id_pages(target_user.id):
             enqueued_blocks = []
             for followed_id in followed_page:
                 new_block = enqueue_block(
                     followed_id, block_reason, db_session, history_object=block_history,
-                    whitelisted_accounts=whitelisted_accounts)
+                    whitelisted_accounts=authed_user.followed_ids)
 
                 if not new_block[0]:
                     # row not created, reason noted in block_history object
@@ -452,9 +465,7 @@ def queue_unblocks_for(target_user_id: str, db_session: Session,
     # else: order.mode = f"block:{'+'.join(mode)}"
 
 
-def process_block_queue(authed_usr: AuthedUser, db_session: Session,
-                        whitelisted_accounts: Optional[List[int]] = None,
-                        batch_size: int = 20) -> int:
+def process_block_queue(authed_user: AuthedUser, db_session: Session, batch_size: int = 20) -> int:
     """"""
     time_start = time.time()
     queued_count = db_session.query(BlockQueue).count()
@@ -474,12 +485,12 @@ def process_block_queue(authed_usr: AuthedUser, db_session: Session,
         batch = queue_query.limit(batch_size).all()
         try:
             for queued_block in batch:
-                if whitelisted_accounts and queued_block.user_id in whitelisted_accounts:
+                if authed_user.followed_ids and queued_block.user_id in authed_user.followed_ids:
                     print("Found whitelisted account in block queue, skipping")
                     continue
 
                 try:
-                    blocked_user = authed_usr.api.create_block(user_id=queued_block.user_id)
+                    blocked_user = authed_user.api.create_block(user_id=queued_block.user_id)
                 except tweepy.error.TweepError as err:
                     if err.api_code == 50:
                         # https://developer.twitter.com/en/docs/basics/response-codes
