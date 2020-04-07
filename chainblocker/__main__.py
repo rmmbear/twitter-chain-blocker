@@ -29,8 +29,6 @@ ARGPARSER.add_argument(
     "--skip-blocklist-update", action="store_true",
     help="Do not update account's blocklist before queueing/processing.")
 ARGPARSER.add_argument(
-    "--unblocks-first", action="store_true", help="Process unblock queue before the block queue")
-ARGPARSER.add_argument(
     "--only-queue-accounts", action="store_true",
     help="Delay queue processing until next run and only queue accounts for blocking/unblocking.")
 ARGPARSER.add_argument(
@@ -114,7 +112,7 @@ def main(paths: dict, args: Optional[str] = None) -> None:
     args.affect_followed = "followed" in args.mode
 
     #FIXME: implement all arguments
-    NOT_IMPLEMENTED = ["unblocks_first", "only_queue_actions", "comment"]
+    NOT_IMPLEMENTED = ["only_queue_actions", "comment"]
     for missing in NOT_IMPLEMENTED:
         if getattr(args, missing, None):
             raise NotImplementedError(f"'{missing}' is not yet implemented")
