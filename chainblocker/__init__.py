@@ -15,7 +15,7 @@ from sqlalchemy.ext.declarative import declarative_base
 __all__ = [
     "AuthedUser", "BlockHistory", "BlockList", "BlockQueue",
     "BlocklistDBBase", "Metadata", "TopQueue", "UnblockQueue",
-    "blocks_status", "db_maintenance", "declarative_base",
+    "db_maintenance", "declarative_base",
     "enqueue_block", "process_block_queue", "queue_blocks_for",
     "queue_unblocks_for", "update_blocklist",
     ]
@@ -25,7 +25,7 @@ LOG_FORMAT_TERM = logging.Formatter("[%(levelname)s] %(message)s")
 LOGGER = logging.getLogger("ChainBlocker")
 LOGGER.setLevel(logging.DEBUG)
 TH = logging.StreamHandler()
-TH.setLevel(logging.WARNING)
+TH.setLevel(logging.DEBUG)
 TH.setFormatter(LOG_FORMAT_TERM)
 
 LOGGER.addHandler(TH)
@@ -70,6 +70,9 @@ class BlockHistory(BlocklistDBBase):
     followers = sqla.Column(sqla.Integer)
     following = sqla.Column(sqla.Integer)
     mode = sqla.Column(sqla.String) # "block/unblock:followers+target+following"
+    #affect_target = sqla.Column(sqla.Bool)
+    #affect_followers = sqla.Column(sqla.Bool)
+    #affect_followed = sqla.Column(sqla.Bool)
     time = sqla.Column(sqla.Float)
     queued = sqla.Column(sqla.Integer)
     skipped_blocked = sqla.Column(sqla.Integer)
@@ -251,7 +254,6 @@ def update_blocklist(authed_user: AuthedUser, db_session: Session, force: bool =
     #  avoid here)
     # there used to be a way of exporting twitter blocks, but that has been thrown out in the 2019 redesign
     # though, it is still accessible through the old interface (use user-agent trick to get it)
-    print("Updating account's blocklist, this might take a while...")
     import_history = []
     imported_blocks_total = 0
     for blocked_id_page in authed_user.get_blocked_id_pages():
@@ -308,8 +310,6 @@ def queue_blocks_for(target_user: User, authed_user: AuthedUser, db_session: Ses
     if not (block_followers or block_target or block_following):
         raise RuntimeError("Bad arguments - no blocks will be queued")
 
-    print(target_user.screen_name, ": This user has", target_user.followers_count, "followers")
-
     mode_str = []
     if block_followers:
         mode_str.append("followers")
@@ -318,12 +318,10 @@ def queue_blocks_for(target_user: User, authed_user: AuthedUser, db_session: Ses
     if block_following:
         mode_str.append("following")
 
-    time_start = time.time()
-
     block_history = BlockHistory(
         user_id=target_user.id, screen_name=target_user.screen_name,
         followers=target_user.followers_count, following=target_user.friends_count, mode=f"block:{'+'.join(mode_str)}",
-        time=time_start, queued=0, skipped_blocked=0, skipped_queued=0, skipped_following=0)
+        time=time.time(), queued=0, skipped_blocked=0, skipped_queued=0, skipped_following=0)
 
     db_session.add(block_history)
 
@@ -379,38 +377,31 @@ def queue_blocks_for(target_user: User, authed_user: AuthedUser, db_session: Ses
         db_session.commit()
 
     # FIXME: remove target_user from metaqueue
-
-    time_total = time.time() - time_start
-    print(f"Queued:          {block_history.queued}")
-    print(f"Already queued:  {block_history.skipped_queued}")
-    print(f"Already blocked: {block_history.skipped_blocked}")
-    print(f"Following:       {block_history.skipped_following}")
-    time_str = f"{int(time_total // 3600)}h {int((time_total / 60) % 60)}m {int(time_total % 60)}s"
-    print(f"This took {time_str}")
-    LOGGER.info("Stats: queued=%s, skipped_blocked=%s, skipped_queued=%s, skipped_following=%s, time=%s",
-                block_history.queued, block_history.skipped_blocked, block_history.skipped_queued,
-                block_history.skipped_following, time_str)
-
-    return block_history.queued
+    return block_history
 
 
-def queue_unblocks_for(target_user_id: str, db_session: Session,
+def queue_unblocks_for(target_user: User, db_session: Session,
                        unblock_target: bool = True, unblock_followers: bool = True,
                        unblock_following: bool = False) -> int:
     """"""
     reasons = []
     if unblock_target:
-        reasons.append(f"target:{target_user_id}")
+        reasons.append(f"target:{target_user.id}")
     if unblock_followers:
-        reasons.append(f"follower_of:{target_user_id}")
+        reasons.append(f"follower_of:{target_user.id}")
     if unblock_following:
-        reasons.append(f"followed_by:{target_user_id}")
+        reasons.append(f"followed_by:{target_user.id}")
 
+    #block_history = BlockHistory(
+    #    user_id=target_user.id, screen_name=target_user.screen_name,
+    #    followers=target_user.followers_count, following=target_user.friends_count, mode=f"unblock:{'+'.join(mode_str)}",
+    #    time=time.time(), queued=0, skipped_blocked=0, skipped_queued=0, skipped_following=0)
+    #db_session.add(block_history)
     # remove blocks from the queue
     block_queue_query = db_session.query(BlockQueue).filter(BlockQueue.reason in reasons)
     cancelled_blocks_count = block_queue_query.count()
     if cancelled_blocks_count:
-        print(f"Removing {cancelled_blocks_count} blocks from the queue")
+        LOGGER.info("removing %s blocks from block queue", cancelled_blocks_count)
         block_queue_query.delete()
         db_session.commit()
 
@@ -418,7 +409,7 @@ def queue_unblocks_for(target_user_id: str, db_session: Session,
     block_list_query = db_session.query(BlockList).filter(BlockQueue.reason in reasons)
     matching_blocks_count = block_list_query.count()
     if matching_blocks_count:
-        print(f"Queueing unblocks for {matching_blocks_count} users")
+        LOGGER.info("Queueing unblocks for %s users", matching_blocks_count)
         while db_session.query(block_list_query.exists()).scalar():
             new_unblocks = []
             for blocked_user in block_list_query.limit(500).all():
@@ -430,13 +421,7 @@ def queue_unblocks_for(target_user_id: str, db_session: Session,
             db_session.add_all(new_unblocks)
             db_session.commit()
 
-    if cancelled_blocks_count + matching_blocks_count == 0:
-        print("Did not find any accounts to unblock")
-        return 0
-
-    print(f"Cancelled {cancelled_blocks_count} blocks")
-    print(f"Queued {matching_blocks_count} unblocks")
-    return matching_blocks_count + cancelled_blocks_count
+    return cancelled_blocks_count, matching_blocks_count
 
     #FIXME: remove target_user from metaqueue
     # if the target user is in the top queue, modify the top queue order's mode
@@ -451,14 +436,7 @@ def process_block_queue(authed_user: AuthedUser, db_session: Session, batch_size
     time_start = time.time()
     queued_count = db_session.query(BlockQueue).count()
     if not queued_count:
-        print("Block queue empty")
         return 0
-
-    print(f"There are {queued_count} accounts in the queue")
-    LOGGER.info("There are %s accounts in the queue", queued_count)
-    time_str = str(datetime.timedelta(seconds=queued_count))
-    print(f"Which should take {time_str} (at 1 second per request)")
-    LOGGER.info("Which should take %s (at 1 second per request)", time_str)
 
     blocked_num = 0
     queue_query = db_session.query(BlockQueue).filter(BlockQueue.queued_at <= time_start).order_by(BlockQueue.queued_at.desc())
@@ -467,7 +445,7 @@ def process_block_queue(authed_user: AuthedUser, db_session: Session, batch_size
         try:
             for queued_block in batch:
                 if authed_user.followed_ids and queued_block.user_id in authed_user.followed_ids:
-                    print("Found whitelisted account in block queue, skipping")
+                    LOGGER.warning("Found whitelisted account in block queue, skipping: %s", queued_block.user_id)
                     continue
 
                 try:
@@ -514,32 +492,10 @@ def process_block_queue(authed_user: AuthedUser, db_session: Session, batch_size
             break
 
     db_session.commit()
-
-    time_total = time.time() - time_start
-    time_str = str(datetime.timedelta(seconds=time_total))
-    print(f"Processed {blocked_num} out of {queued_count} blocks ({blocked_num / queued_count * 100:.2f}%)")
-    LOGGER.info("Processed %s out of %s blocks)", blocked_num, queued_count)
-    print(f"This took {time_str}")
-    LOGGER.info("Processing took %s", time_str)
-    LOGGER.info("processing + networking per block = %ss avg", blocked_num / time_total)
-
     return blocked_num
 
 
-def blocks_status(db_session: Session) -> dict:
-    """Return counts for queues and blocklist tables."""
-    tables_dict = {
-        "Blocked": BlockList,
-        "In Block Queue": BlockQueue,
-        "In Unblock Queue": UnblockQueue,
-    }
-    counts = {heading : db_session.query(table).count() for heading, table in tables_dict.items()}
-
-    return counts
-
-
 def db_maintenance(db_session: Session) -> None:
-    print("Performing database maintenance, this will take a while...")
     ###Clean orphaned blocks in queue
     last_user_id = 0
     block_queue_query = db_session.query(BlockQueue).filter(BlockQueue.user_id > last_user_id).order_by(BlockQueue.user_id)
@@ -566,6 +522,7 @@ def db_maintenance(db_session: Session) -> None:
     last_vacuum_row = Metadata.get_row("last_vacuum", db_session, "0")
     if float(last_vacuum_row.val) + vacuum_delay <= time.time():
         LOGGER.info("Vacuuming database...")
+        print("Vacuuming database...")
         db_session.execute("VACUUM")
         last_vacuum_row.val = str(time.time())
 

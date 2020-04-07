@@ -4,6 +4,7 @@ import sys
 import time
 import shutil
 import logging
+import datetime
 from typing import Optional
 
 from pathlib import Path
@@ -131,21 +132,23 @@ def main(paths: dict, args: Optional[str] = None) -> None:
 
     #TODO: add confirmation dialogues for blocking and unblocking
     blocks_queued = 0
+
     try:
-        clean_exit = chainblocker.Metadata.get_row("clean_exit", db_session, "1")
-        if clean_exit.val == "0":
+        if chainblocker.Metadata.get_row("clean_exit", db_session, "1") == "0":
             LOGGER.warning("Exception encountered in last session, performing maintenance")
             print("Exception encountered in last session, performing maintenance")
             chainblocker.db_maintenance(db_session)
 
         print("Current blocklist statistics:")
-        for name, count in chainblocker.blocks_status(db_session).items():
-            print(f"{name} : {count}")
 
+        for pair in [("Blocked:         ", chainblocker.BlockList), \
+                     ("In Block Queue:  ", chainblocker.BlockQueue), \
+                     ("In Unblock Queue:", chainblocker.UnblockQueue)]:
+            print(pair[0], db_session.query(pair[1]).count())
         print()
 
         if args.command == "reason":
-            reason(target_user=args.account_name, authed_user=current_user, db_session=db_session)
+            reason(target_user=args.account_name[0], authed_user=current_user, db_session=db_session)
 
         if args.command == "unblock":
             for unblock_target in args.account:
@@ -155,7 +158,9 @@ def main(paths: dict, args: Optional[str] = None) -> None:
 
         if args.command == "block":
             if not args.skip_blocklist_update and not args.only_queue_action:
+                print("Updating account's blocklist, this might take a while...")
                 chainblocker.update_blocklist(current_user, db_session)
+
             for block_target in args.accounts:
                 block(target_user=args.block_target, authed_user=current_user, db_session=db_session,
                       affect_target=args.affect_target, affect_followers=args.affect_followers,
@@ -163,14 +168,29 @@ def main(paths: dict, args: Optional[str] = None) -> None:
 
         if not args.only_queue_accounts and not args.only_queue_actions and args.command != "reason":
             print("Processing block queue")
-            chainblocker.process_block_queue(current_user, db_session)
+            #FIXME: do not count blocks "in the future"
+            queued_blocks = db_session.query(chainblocker.BlockQueue).count()
+            print(f"There are {queued_blocks} accounts in the queue")
+            LOGGER.info("There are %s accounts in the queue", queued_blocks)
+
+            time_start = time.time()
+            blocked_num = chainblocker.process_block_queue(current_user, db_session)
+            time_total = time.time() - time_start
+
+            time_str = str(datetime.timedelta(seconds=time_total))
+            print(f"Processed {blocked_num} out of {queued_blocks} blocks ({blocked_num / queued_blocks * 100:.2f}%)")
+            print(f"This took {time_str}")
+            LOGGER.info("Processed %s out of %s blocks)", blocked_num, queued_blocks)
+            LOGGER.info("Processing took %s", time_str)
+            LOGGER.info("processing + networking per block = %ss avg", blocked_num / time_total)
 
         chainblocker.Metadata.set_row("clean_exit", 1, db_session)
-    except:
+    # did you know that pylint does not report any errors from bare except blocks? I didn't
+    except Exception as exc:
         LOGGER.error("Uncaught exception, rolling back db session")
         db_session.rollback()
         chainblocker.Metadata.set_row("clean_exit", 0, db_session)
-        raise
+        raise exc
     finally:
         LOGGER.info("Closing db session")
         db_session.close()
@@ -226,16 +246,25 @@ def block(target_user: str, authed_user: chainblocker.AuthedUser, db_session: Se
           affect_target: bool = True, affect_followers: bool = True,
           affect_followed: bool = False) -> None:
     """"""
-    print("getting authenticated user's follows...")
-
     target_user = authed_user.get_user(screen_name=target_user)
+    print(target_user.screen_name, ": This user has", target_user.followers_count, "followers")
     LOGGER.info("Queueing blocks for followers of USER=%s ID=%s", target_user.screen_name, target_user.id)
-    blocks_queued = chainblocker.queue_blocks_for(
+    time_start = time.time()
+    block_history = chainblocker.queue_blocks_for(
         target_user=target_user, authed_user=authed_user, db_session=db_session,
         block_followers=affect_followers, block_target=affect_target,
         block_following=affect_followed)
 
-    print(f"Added {blocks_queued} new accounts to block queue")
+    time_total = time.time() - time_start
+    time_str = str(datetime.timedelta(seconds=time_total))
+    print(f"Queued:          {block_history.queued}")
+    print(f"Already queued:  {block_history.skipped_queued}")
+    print(f"Already blocked: {block_history.skipped_blocked}")
+    print(f"Following:       {block_history.skipped_following}")
+    print(f"This took:       {time_str}")
+    LOGGER.info("Stats: queued=%s, skipped_blocked=%s, skipped_queued=%s, skipped_following=%s, time=%s",
+                block_history.queued, block_history.skipped_blocked, block_history.skipped_queued,
+                block_history.skipped_following, time_str)
 
 
 def unblock(target_user: str, authed_user: chainblocker.AuthedUser, db_session: Session,
@@ -244,6 +273,12 @@ def unblock(target_user: str, authed_user: chainblocker.AuthedUser, db_session: 
     """"""
     #FIXME: implement unblocking
     raise NotImplementedError()
+    target_user = authed_user.get_user(screen_name=target_user)
+    cancelled, queued = chainblocker.queue_unblocks_for(
+        target_user, db_session, affect_target, affect_followers, affect_followed)
+
+    print(f"Queued unblocks:  {queued}")
+    print(f"Cancelled blocks: {cancelled}")
 
 
 if __name__ == "__main__":
