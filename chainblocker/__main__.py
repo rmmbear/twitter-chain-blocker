@@ -139,14 +139,6 @@ def main(paths: dict, args: Optional[str] = None) -> None:
             print("Exception encountered in last session, performing maintenance")
             chainblocker.db_maintenance(db_session)
 
-        print("Current blocklist statistics:")
-
-        for pair in [("Blocked:         ", chainblocker.BlockList), \
-                     ("In Block Queue:  ", chainblocker.BlockQueue), \
-                     ("In Unblock Queue:", chainblocker.UnblockQueue)]:
-            print(pair[0], db_session.query(pair[1]).count())
-        print()
-
         if args.command == "reason":
             reason(target_user=args.account_name[0], authed_user=current_user, db_session=db_session)
 
@@ -167,22 +159,7 @@ def main(paths: dict, args: Optional[str] = None) -> None:
                       affect_followed=args.affect_followed)
 
         if not args.only_queue_accounts and not args.only_queue_actions and args.command != "reason":
-            print("Processing block queue")
-            #FIXME: do not count blocks "in the future"
-            queued_blocks = db_session.query(chainblocker.BlockQueue).count()
-            print(f"There are {queued_blocks} accounts in the queue")
-            LOGGER.info("There are %s accounts in the queue", queued_blocks)
-
-            time_start = time.time()
-            blocked_num = chainblocker.process_block_queue(current_user, db_session)
-            time_total = time.time() - time_start
-
-            time_str = str(datetime.timedelta(seconds=time_total))
-            print(f"Processed {blocked_num} out of {queued_blocks} blocks ({blocked_num / queued_blocks * 100:.2f}%)")
-            print(f"This took {time_str}")
-            LOGGER.info("Processed %s out of %s blocks)", blocked_num, queued_blocks)
-            LOGGER.info("Processing took %s", time_str)
-            LOGGER.info("processing + networking per block = %ss avg", blocked_num / time_total)
+            process_queues(current_user, db_session)
 
         chainblocker.Metadata.set_row("clean_exit", 1, db_session)
     # did you know that pylint does not report any errors from bare except blocks? I didn't
@@ -279,6 +256,45 @@ def unblock(target_user: str, authed_user: chainblocker.AuthedUser, db_session: 
 
     print(f"Queued unblocks:  {queued}")
     print(f"Cancelled blocks: {cancelled}")
+
+
+def process_queues(authed_user: chainblocker.AuthedUser, db_session: Session) -> None:
+    """"""
+    #FIXME: do not count blocks and unblocks "in the future"
+    blocked_accs = db_session.query(chainblocker.BlockList).count()
+    queued_blocks = db_session.query(chainblocker.BlockQueue).count()
+    queued_unblocks = db_session.query(chainblocker.UnblockQueue).count()
+    print("Current blocklist statistics:")
+    print(f"Blocked accounts: {blocked_accs}")
+    print(f"In Unblock Queue: {queued_unblocks}")
+    print(f"In Block Queue:   {queued_blocks}")
+    print()
+
+    if queued_unblocks:
+        print("Processing unblock queue")
+        time_start = time.time()
+        unblocked_num = chainblocker.process_block_queue(authed_user, db_session)
+        time_total = time.time() - time_start
+
+        time_str = str(datetime.timedelta(seconds=time_total))
+        print(f"Processed {unblocked_num} out of {queued_unblocks} unblocks ({unblocked_num / queued_unblocks * 100:.2f}%)")
+        print(f"This took {time_str}")
+        LOGGER.info("Processed %s out of %s unblocks)", unblocked_num, queued_unblocks)
+        LOGGER.info("Processing took %s", time_str)
+        LOGGER.info("processing + networking per unblock = %ss avg", unblocked_num / time_total)
+
+    if queued_blocks:
+        print("Processing block queue")
+        time_start = time.time()
+        blocked_num = chainblocker.process_block_queue(authed_user, db_session)
+        time_total = time.time() - time_start
+
+        time_str = str(datetime.timedelta(seconds=time_total))
+        print(f"Processed {blocked_num} out of {queued_blocks} blocks ({blocked_num / queued_blocks * 100:.2f}%)")
+        print(f"This took {time_str}")
+        LOGGER.info("Processed %s out of %s blocks)", blocked_num, queued_blocks)
+        LOGGER.info("Processing took %s", time_str)
+        LOGGER.info("processing + networking per block = %ss avg", blocked_num / time_total)
 
 
 if __name__ == "__main__":
