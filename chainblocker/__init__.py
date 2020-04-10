@@ -69,10 +69,10 @@ class BlockHistory(BlocklistDBBase):
     screen_name = sqla.Column(sqla.String)
     followers = sqla.Column(sqla.Integer)
     following = sqla.Column(sqla.Integer)
-    mode = sqla.Column(sqla.String) # "block/unblock:followers+target+following"
-    #affect_target = sqla.Column(sqla.Bool)
-    #affect_followers = sqla.Column(sqla.Bool)
-    #affect_followed = sqla.Column(sqla.Bool)
+    mode = sqla.Column(sqla.String) # this is either "block" or "unblock"
+    affect_target = sqla.Column(sqla.Boolean)
+    affect_followers = sqla.Column(sqla.Boolean)
+    affect_followed = sqla.Column(sqla.Boolean)
     time = sqla.Column(sqla.Float)
     queued = sqla.Column(sqla.Integer)
     skipped_blocked = sqla.Column(sqla.Integer)
@@ -86,9 +86,10 @@ class BlockList(BlocklistDBBase):
     """"""
     __tablename__ = "blocked_accounts"
     user_id = sqla.Column(sqla.Integer, primary_key=True)
-    screen_name = sqla.Column(sqla.String)
     block_time = sqla.Column(sqla.Float)
     reason = sqla.Column(sqla.String)
+    reason_id = sqla.Column(sqla.Integer)
+    session = sqla.Column(sqla.Integer) # this is the id of BlockHistory row
 
 
 class BlockQueue(BlocklistDBBase):
@@ -96,7 +97,9 @@ class BlockQueue(BlocklistDBBase):
     __tablename__ = "block_queue"
     user_id = sqla.Column(sqla.Integer, primary_key=True)
     queued_at = sqla.Column(sqla.Float)
-    reason = sqla.Column(sqla.String)
+    reason = sqla.Column(sqla.String) #
+    reason_id = sqla.Column(sqla.String) #
+    session = sqla.Column(sqla.Integer) # this is the id of BlockHistory row
 
 
 class UnblockQueue(BlocklistDBBase):
@@ -105,6 +108,8 @@ class UnblockQueue(BlocklistDBBase):
     user_id = sqla.Column(sqla.Integer, primary_key=True)
     queued_at = sqla.Column(sqla.Float)
     reason = sqla.Column(sqla.String)
+    reason_id = sqla.Column(sqla.String)
+    session = sqla.Column(sqla.Integer)
 
 
 class TopQueue(BlocklistDBBase):
@@ -116,6 +121,9 @@ class TopQueue(BlocklistDBBase):
     followers = sqla.Column(sqla.Integer)
     following = sqla.Column(sqla.Integer)
     action = sqla.Column(sqla.String) # "block/unblock:followers+target+following"
+    affect_target = sqla.Column(sqla.Boolean)
+    affect_followers = sqla.Column(sqla.Boolean)
+    affect_followed = sqla.Column(sqla.Boolean)
     comment = sqla.Column(sqla.String)
 
 
@@ -165,6 +173,7 @@ class AuthedUser:
 
         auth_handler.set_access_token(key, secret)
         return cls(auth_handler)
+
 
     @property
     def user(self) -> User:
@@ -477,8 +486,7 @@ def process_block_queue(authed_user: AuthedUser, db_session: Session, batch_size
                     raise
 
                 block_row = BlockList(
-                    user_id=blocked_user.id, screen_name=blocked_user.screen_name,
-                    block_time=time.time(), reason=queued_block.reason)
+                    user_id=blocked_user.id, block_time=time.time(), reason=queued_block.reason)
 
                 print(f"Blocked {blocked_user.screen_name} ({blocked_user.name}) - id {blocked_user.id}")
 
