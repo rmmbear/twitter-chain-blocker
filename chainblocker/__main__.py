@@ -147,12 +147,12 @@ def main(paths: dict, args: Optional[str] = None) -> None:
                         affect_followed=args.affect_followed)
 
         if args.command == "block":
-            if not args.skip_blocklist_update and not args.only_queue_action:
+            if not args.skip_blocklist_update and not args.only_queue_actions:
                 print("Updating account's blocklist, this might take a while...")
                 chainblocker.update_blocklist(current_user, db_session)
 
             for block_target in args.accounts:
-                block(target_user=args.block_target, authed_user=current_user, db_session=db_session,
+                block(target_user=block_target, authed_user=current_user, db_session=db_session,
                       affect_target=args.affect_target, affect_followers=args.affect_followers,
                       affect_followed=args.affect_followed)
 
@@ -252,8 +252,8 @@ def unblock(target_user: str, authed_user: chainblocker.AuthedUser, db_session: 
     cancelled, queued = chainblocker.queue_unblocks_for(
         target_user, db_session, affect_target, affect_followers, affect_followed)
 
-    print(f"Queued unblocks:  {queued}")
     print(f"Cancelled blocks: {cancelled}")
+    print(f"Queued unblocks:  {queued}")
 
 
 def process_queues(authed_user: chainblocker.AuthedUser, db_session: Session) -> None:
