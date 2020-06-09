@@ -20,11 +20,12 @@ LOGGER = logging.getLogger(__name__)
 
 ARGPARSER = ArgumentParser(
     prog="chainblocker",
-    description="All account arguments must be passed in form of screen names (a.k.a 'handles'), "
+    description="All account arguments must be passed in form of screen names (aka 'handles'), "
                 "and not display names or IDs. Screen names are resolved to IDs internally, which "
                 "means that this program will work even when blocked users change their account names. "
                 "If, for any reason, chainblocker was stopped while processing queues and you would "
                 "like to resume without adding anything to the queue, simply run it again without a command")
+### Top-level arguments
 ARGPARSER.add_argument(
     "--skip-blocklist-update", action="store_true",
     help="Do not update account's blocklist before queueing/processing.")
@@ -37,24 +38,27 @@ ARGPARSER.add_argument(
          "Useful if you want to issue different commands one after another, and don't want to wait for account queueing. "
          "This option also disables blocklist update")
 ARGPARSER.add_argument(
-    "--mode", nargs=1, type=str, default=["target+followers"],
+    "--mode", type=str, default="target+followers",
     help="Set which parties will be affected in current batch of accounts. "
          "Options must be delimited with a '+' symbol. Possible options are: "
          "target = the account named, followers = target's followers, followed = people followed by target. "
          "Mode defaults to target+followers for both blocking and unblocking")
 ARGPARSER.add_argument(
-    "--comment", nargs=1, type=str,
+    "--comment", type=str,
     help="Set the comment for this batch operation. This comment will be displayed when querying block reason. "
          "If left empty, comment will be automatically set to "
          "'Session {year}/{month}/{day} {hours}:{minutes}:{seconds}, queried {number} accounts'")
 
 ARGP_COMMANDS = ARGPARSER.add_subparsers(title="Commands", dest="command", metavar="")
+### Block command
 ARGP_BLOCK = ARGP_COMMANDS.add_parser(
     "block",
     help="Block specified accounts and their followers (use --mode to change this behavior)")
 ARGP_BLOCK.add_argument(
     "accounts", nargs="*",
     help="List of screen names of accounts you wish to block")
+
+### Unblock command
 ARGP_UNBLOCK = ARGP_COMMANDS.add_parser(
     "unblock",
     help="Unblock (or remove from the block queue) specified accounts and their followers "
@@ -63,13 +67,13 @@ ARGP_UNBLOCK = ARGP_COMMANDS.add_parser(
 ARGP_UNBLOCK.add_argument(
     "accounts", nargs="*",
     help="List of screen names of accounts you wish to unblock.")
+
+### Reason command
 ARGP_REASON = ARGP_COMMANDS.add_parser("reason", help="Check if you are blocking someone and display details of that block")
 ARGP_REASON.add_argument(
-    "account_name", nargs=1, type=str,
+    "account_name", type=str,
     help="Screen name of the account you want to query")
 
-
-#TODO: implement show_user_info -just pretty print the User object + number of blocked users + block reason
 #TODO: implement session comments, with the default comment being the time of the session's start
 
 def get_workdirs() -> dict:
@@ -97,7 +101,8 @@ def get_workdirs() -> dict:
 def main(paths: dict, args: Optional[str] = None) -> None:
     """"""
     args = ARGPARSER.parse_args(args)
-    args.mode = args.mode[0].split("+")
+    print(args)
+    args.mode = args.mode.split("+")
     if len(args.mode) > 3:
         sys.exit("ERROR: Received more than three targes for --mode\n"
                  "(only accepting 'target', 'followers' and 'followed')")
@@ -112,7 +117,7 @@ def main(paths: dict, args: Optional[str] = None) -> None:
     args.affect_followed = "followed" in args.mode
 
     #FIXME: implement all arguments
-    NOT_IMPLEMENTED = ["only_queue_actions", "comment"]
+    NOT_IMPLEMENTED = ["only_queue_actions"]
     for missing in NOT_IMPLEMENTED:
         if getattr(args, missing, None):
             raise NotImplementedError(f"'{missing}' is not yet implemented")
@@ -128,8 +133,20 @@ def main(paths: dict, args: Optional[str] = None) -> None:
     session_start = time.time()
     db_session = bound_session()
 
-    #TODO: add confirmation dialogues for blocking and unblocking
-    blocks_queued = 0
+    if args.command in ("unblock", "block"):
+        session_id = db_session.\
+            query(sqla.sql.func.max(chainblocker.BlockHistory.session)).one_or_none()[0]
+        if not session_id:
+            session_id = 1
+        else:
+            session_id += 1
+
+        if not args.comment:
+            args.comment = time.strftime(f"Session %Y/%m/%d %H:%M:%S, queried {len(args.accounts)} accounts")
+
+        #FIXME: expect errors when fetching users
+        #https://developer.twitter.com/en/docs/basics/response-codes
+        #args.accounts = [current_user.get_user(screen_name=user) for user in args.accounts]
 
     try:
         if chainblocker.Metadata.get_row("clean_exit", db_session, "1") == "0":
@@ -138,23 +155,38 @@ def main(paths: dict, args: Optional[str] = None) -> None:
             chainblocker.db_maintenance(db_session)
 
         if args.command == "reason":
-            reason(target_user=args.account_name[0], authed_user=current_user, db_session=db_session)
+            reason(target_user=args.account_name, authed_user=current_user, db_session=db_session)
 
         if args.command == "unblock":
-            for unblock_target in args.account:
-                unblock(target_user=unblock_target, authed_user=current_user, db_session=db_session,
-                        affect_target=args.affect_target, affect_followers=args.affect_followers,
-                        affect_followed=args.affect_followed)
+            for unblock_target in args.accounts:
+                unblock(
+                    target_user=unblock_target,
+                    authed_user=current_user,
+                    db_session=db_session,
+                    affect_target=args.affect_target,
+                    affect_followers=args.affect_followers,
+                    affect_followed=args.affect_followed,
+                    session_comment=args.comment,
+                    session_id=session_id
+                )
 
         if args.command == "block":
             if not args.skip_blocklist_update and not args.only_queue_actions:
                 print("Updating account's blocklist, this might take a while...")
                 chainblocker.update_blocklist(current_user, db_session)
+                print("Blocklist update complete\n")
 
             for block_target in args.accounts:
-                block(target_user=block_target, authed_user=current_user, db_session=db_session,
-                      affect_target=args.affect_target, affect_followers=args.affect_followers,
-                      affect_followed=args.affect_followed)
+                block(
+                    target_user=block_target,
+                    authed_user=current_user,
+                    db_session=db_session,
+                    affect_target=args.affect_target,
+                    affect_followers=args.affect_followers,
+                    affect_followed=args.affect_followed,
+                    session_comment=args.comment,
+                    session_id=session_id
+                )
 
         if not args.only_queue_accounts and not args.only_queue_actions and args.command != "reason":
             process_queues(current_user, db_session)
@@ -181,6 +213,7 @@ def authenticate_interactive() -> chainblocker.AuthedUser:
     print(f"{auth_url}")
     auth_pin = input("Please paste the PIN here: ").strip()
     #FIXME: perform error-checking, check input
+    #FIXME: expect authentication errors
     access_token = auth_handler.get_access_token(auth_pin)
     auth_handler.set_access_token(*access_token)
     authed_user = chainblocker.AuthedUser(auth_handler)
@@ -201,14 +234,14 @@ def reason(target_user: str, authed_user: chainblocker.AuthedUser, db_session: S
         reason_string = reason_string.format(
             twitter_user.screen_name, twitter_user.id, "Not in local block database!", "---")
     else:
-        reason_chain, reason_id = block_row.reason.split(":")
-        if reason_chain == "target":
+        if block_row.reason == "target":
             reason_full = "First in chain (blocking target)"
-        elif reason_chain == "unknown":
+        elif block_row.reason == "unknown":
             reason_full = "Unknown, this block was not made using chainblocker"
         else:
-            reason_user = authed_user.get_user(int(reason_id))
-            reason_full = f"{reason_chain.replace('_', ' ' )} {reason_user.screen_name} (ID={reason_id})"
+            #FIXME: expect errors retrieving users
+            reason_user = authed_user.get_user(int(block_row.reason_id))
+            reason_full = f"{block_row.reason.replace('_', ' ' )} {reason_user.screen_name} (ID={block_row.reason_id})"
         reason_string = reason_string.format(
             twitter_user.screen_name, twitter_user.id,
             time.strftime("Blocked on %Y/%m/%d %H:%M:%S", time.localtime(block_row.block_time)) if block_row.block_time else "Blocked on ???",
@@ -218,17 +251,24 @@ def reason(target_user: str, authed_user: chainblocker.AuthedUser, db_session: S
 
 
 def block(target_user: str, authed_user: chainblocker.AuthedUser, db_session: Session,
-          affect_target: bool = True, affect_followers: bool = True,
-          affect_followed: bool = False) -> None:
+          session_comment: str, session_id: int, affect_target: bool, affect_followers: bool,
+          affect_followed: bool
+         ) -> None:
     """"""
     target_user = authed_user.get_user(screen_name=target_user)
     print(target_user.screen_name, ": This user has", target_user.followers_count, "followers")
     LOGGER.info("Queueing blocks for followers of USER=%s ID=%s", target_user.screen_name, target_user.id)
     time_start = time.time()
     block_history = chainblocker.queue_blocks_for(
-        target_user=target_user, authed_user=authed_user, db_session=db_session,
-        block_followers=affect_followers, block_target=affect_target,
-        block_following=affect_followed)
+        target_user=target_user,
+        authed_user=authed_user,
+        db_session=db_session,
+        block_target=affect_target,
+        block_followers=affect_followers,
+        block_followed=affect_followed,
+        session_comment=session_comment,
+        session_id=session_id
+    )
 
     time_total = time.time() - time_start
     time_str = str(datetime.timedelta(seconds=time_total))
@@ -237,23 +277,34 @@ def block(target_user: str, authed_user: chainblocker.AuthedUser, db_session: Se
     print(f"Already blocked: {block_history.skipped_blocked}")
     print(f"Following:       {block_history.skipped_following}")
     print(f"This took:       {time_str}")
-    LOGGER.info("Stats: queued=%s, skipped_blocked=%s, skipped_queued=%s, skipped_following=%s, time=%s",
-                block_history.queued, block_history.skipped_blocked, block_history.skipped_queued,
-                block_history.skipped_following, time_str)
+    print()
+    LOGGER.info(
+        "Stats: queued=%s, skipped_blocked=%s, skipped_queued=%s, skipped_following=%s, time=%s",
+        block_history.queued, block_history.skipped_blocked, block_history.skipped_queued,
+        block_history.skipped_following, time_str
+    )
 
 
 def unblock(target_user: str, authed_user: chainblocker.AuthedUser, db_session: Session,
-            affect_target: bool = True, affect_followers: bool = True,
-            affect_followed: bool = False) -> None:
+            session_comment: str, session_id: int, affect_target: bool, affect_followers: bool, affect_followed: bool
+           ) -> None:
     """"""
     #FIXME: implement unblocking
     raise NotImplementedError()
     target_user = authed_user.get_user(screen_name=target_user)
     cancelled, queued = chainblocker.queue_unblocks_for(
-        target_user, db_session, affect_target, affect_followers, affect_followed)
+        target_user,
+        db_session,
+        unblock_target=affect_target,
+        unblock_followers=affect_followers,
+        unblock_followed=affect_followed,
+        session_comment=session_comment,
+        session_id=session_id
+    )
 
     print(f"Cancelled blocks: {cancelled}")
     print(f"Queued unblocks:  {queued}")
+    print()
 
 
 def process_queues(authed_user: chainblocker.AuthedUser, db_session: Session) -> None:
@@ -277,6 +328,7 @@ def process_queues(authed_user: chainblocker.AuthedUser, db_session: Session) ->
         time_str = str(datetime.timedelta(seconds=time_total))
         print(f"Processed {unblocked_num} out of {queued_unblocks} unblocks ({unblocked_num / queued_unblocks * 100:.2f}%)")
         print(f"This took {time_str}")
+        print()
         LOGGER.info("Processed %s out of %s unblocks)", unblocked_num, queued_unblocks)
         LOGGER.info("Processing took %s", time_str)
         LOGGER.info("processing + networking per unblock = %ss avg", unblocked_num / time_total)
@@ -290,6 +342,7 @@ def process_queues(authed_user: chainblocker.AuthedUser, db_session: Session) ->
         time_str = str(datetime.timedelta(seconds=time_total))
         print(f"Processed {blocked_num} out of {queued_blocks} blocks ({blocked_num / queued_blocks * 100:.2f}%)")
         print(f"This took {time_str}")
+        print()
         LOGGER.info("Processed %s out of %s blocks)", blocked_num, queued_blocks)
         LOGGER.info("Processing took %s", time_str)
         LOGGER.info("processing + networking per block = %ss avg", blocked_num / time_total)
@@ -310,9 +363,9 @@ if __name__ == "__main__":
         # ignore argparse-issued systemexit
         if not isinstance(exc, SystemExit):
             LOGGER.exception("UNCAUGHT EXCEPTION:")
-            exception_log = PATHS["data"] / time.strftime("chainblocker_exception_%Y-%m-%dT_%H-%M-%S.log")
-            shutil.copy(FH.baseFilename, exception_log)
+            EXCEPTION_LOG = PATHS["data"] / time.strftime("chainblocker_exception_%Y-%m-%dT_%H-%M-%S.log")
+            shutil.copy(FH.baseFilename, EXCEPTION_LOG)
             print("Chainblocker quit due to unexpected error!")
             print(f"Error: {exc}")
-            print(f"Traceback has been saved to {str(exception_log)}")
+            print(f"Traceback has been saved to {str(EXCEPTION_LOG)}")
             print("If this issue persists, please report it to the project's github repo: https://github.com/rmmbear/twitter-chain-blocker")

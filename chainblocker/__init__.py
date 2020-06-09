@@ -65,6 +65,7 @@ class BlockHistory(BlocklistDBBase):
     """"""
     __tablename__ = "history"
     id = sqla.Column(sqla.Integer, primary_key=True)
+    session = sqla.Column(sqla.Integer)
     user_id = sqla.Column(sqla.Integer)
     screen_name = sqla.Column(sqla.String)
     followers = sqla.Column(sqla.Integer)
@@ -79,7 +80,6 @@ class BlockHistory(BlocklistDBBase):
     skipped_queued = sqla.Column(sqla.Integer)
     skipped_following = sqla.Column(sqla.Integer)
     comment = sqla.Column(sqla.String)
-    #FIXME: implement comment (one comment for session's batch of accounts)
 
 
 class BlockList(BlocklistDBBase):
@@ -87,9 +87,9 @@ class BlockList(BlocklistDBBase):
     __tablename__ = "blocked_accounts"
     user_id = sqla.Column(sqla.Integer, primary_key=True)
     block_time = sqla.Column(sqla.Float)
-    reason = sqla.Column(sqla.String)
-    reason_id = sqla.Column(sqla.Integer)
-    session = sqla.Column(sqla.Integer) # this is the id of BlockHistory row
+    reason = sqla.Column(sqla.Integer) # 0: unknown, 1: target, 2: follower, 3: followed
+    reason_id = sqla.Column(sqla.Integer) # id of user responsible for this block, none if reason=1
+    session = sqla.Column(sqla.Integer) # id of existing BlockHistory row
 
 
 class BlockQueue(BlocklistDBBase):
@@ -97,9 +97,9 @@ class BlockQueue(BlocklistDBBase):
     __tablename__ = "block_queue"
     user_id = sqla.Column(sqla.Integer, primary_key=True)
     queued_at = sqla.Column(sqla.Float)
-    reason = sqla.Column(sqla.String) #
-    reason_id = sqla.Column(sqla.String) #
-    session = sqla.Column(sqla.Integer) # this is the id of BlockHistory row
+    reason = sqla.Column(sqla.Integer) # 0: unknown, 1: target, 2: follower, 3: followed
+    reason_id = sqla.Column(sqla.Integer) # id of user responsible for this block, none if reason=1
+    session = sqla.Column(sqla.Integer) # id of existing BlockHistory row
 
 
 class UnblockQueue(BlocklistDBBase):
@@ -107,9 +107,9 @@ class UnblockQueue(BlocklistDBBase):
     __tablename__ = "unblock_queue"
     user_id = sqla.Column(sqla.Integer, primary_key=True)
     queued_at = sqla.Column(sqla.Float)
-    reason = sqla.Column(sqla.String)
-    reason_id = sqla.Column(sqla.String)
-    session = sqla.Column(sqla.Integer)
+    reason = sqla.Column(sqla.Integer) # 0: unknown, 1: target, 2: follower, 3: followed
+    reason_id = sqla.Column(sqla.Integer) # id of user responsible for this block, none if reason=1
+    session = sqla.Column(sqla.Integer) # id of existing BlockHistory row
 
 
 class TopQueue(BlocklistDBBase):
@@ -120,7 +120,7 @@ class TopQueue(BlocklistDBBase):
     screen_name = sqla.Column(sqla.String)
     followers = sqla.Column(sqla.Integer)
     following = sqla.Column(sqla.Integer)
-    action = sqla.Column(sqla.String) # "block/unblock:followers+target+following"
+    action = sqla.Column(sqla.String) # "block/unblock"
     affect_target = sqla.Column(sqla.Boolean)
     affect_followers = sqla.Column(sqla.Boolean)
     affect_followed = sqla.Column(sqla.Boolean)
@@ -289,8 +289,9 @@ def update_blocklist(authed_user: AuthedUser, db_session: Session, force: bool =
     db_session.commit()
 
 
-def enqueue_block(user_id: int, block_reason: Tuple[str, int, int], db_session: Session,
-                  history_object: BlockHistory, whitelisted_accounts: Optional[List[int]] = None
+def enqueue_block(user_id: int, db_session: Session, history_object: BlockHistory,
+                  reason: int, reason_id: Optional[int],
+                  whitelisted_accounts: Optional[List[int]] = None,
                  ) -> Tuple[Optional[BlockList], int]:
     """Convenience function for creating a BlockQueue row"""
     if db_session.query(db_session.query(BlockList).filter(BlockList.user_id == user_id).exists()).scalar():
@@ -309,39 +310,48 @@ def enqueue_block(user_id: int, block_reason: Tuple[str, int, int], db_session: 
         return None, 3
 
     queued_block = BlockQueue(
-        user_id=user_id, queued_at=time.time(), reason=block_reason[0],
-        reason_id=block_reason[1], session=block_reason[2])
+        user_id=user_id,
+        queued_at=time.time(),
+        reason=reason,
+        reason_id=reason_id,
+        session=history_object.session
+    )
     history_object.queued += 1
     return queued_block, 0
 
 
 def queue_blocks_for(target_user: User, authed_user: AuthedUser, db_session: Session,
-                     block_target: bool = True, block_followers: bool = True,
-                     block_following: bool = False) -> int:
+                     session_id: int, session_comment: str, block_target: bool = True,
+                     block_followers: bool = True, block_followed: bool = False
+                    ) -> int:
     """"""
-    if not (block_followers or block_target or block_following):
+    if not (block_followers or block_target or block_followed):
         raise RuntimeError("Bad arguments - no blocks will be queued")
 
-    mode_str = []
-    if block_followers:
-        mode_str.append("followers")
-    if block_target:
-        mode_str.append("target")
-    if block_following:
-        mode_str.append("following")
-
     block_history = BlockHistory(
-        user_id=target_user.id, screen_name=target_user.screen_name,
-        followers=target_user.followers_count, following=target_user.friends_count, mode=f"block:{'+'.join(mode_str)}",
-        time=time.time(), queued=0, skipped_blocked=0, skipped_queued=0, skipped_following=0)
+        session=session_id,
+        user_id=target_user.id,
+        screen_name=target_user.screen_name,
+        followers=target_user.followers_count,
+        following=target_user.friends_count,
+        mode="block",
+        affect_target=block_target,
+        affect_followers=block_followers,
+        affect_followed=block_followed,
+        time=time.time(),
+        queued=0,
+        skipped_blocked=0,
+        skipped_queued=0,
+        skipped_following=0,
+        comment=session_comment)
 
     db_session.add(block_history)
 
     if block_target:
-        block_reason = f"target:{target_user.id}"
+        reason, reason_id = 1, None # id is none because it is already included as user_id
         new_block = enqueue_block(
-            target_user.id, block_reason, db_session, history_object=block_history,
-            whitelisted_accounts=authed_user.followed_ids)
+            user_id=target_user.id, db_session=db_session, history_object=block_history,
+            whitelisted_accounts=authed_user.followed_ids, reason=reason, reason_id=reason_id)
 
         if new_block[0]:
             db_session.add(new_block[0])
@@ -349,13 +359,14 @@ def queue_blocks_for(target_user: User, authed_user: AuthedUser, db_session: Ses
 
     #FIXME: remove unblocks from UnblockQueue and update the reason in BlockList
     if block_followers:
-        block_reason = f"follower_of:{target_user.id}"
+        reason, reason_id = 2, target_user.id
         for followers_page in authed_user.get_follower_id_pages(target_user.id):
             enqueued_blocks = []
             for follower_id in followers_page:
                 new_block = enqueue_block(
-                    follower_id, block_reason, db_session, history_object=block_history,
-                    whitelisted_accounts=authed_user.followed_ids)
+                    user_id=follower_id, db_session=db_session, history_object=block_history,
+                    whitelisted_accounts=authed_user.followed_ids,
+                    reason=reason, reason_id=reason_id)
 
                 if not new_block[0]:
                     # row not created, reason noted in block_history object
@@ -366,14 +377,15 @@ def queue_blocks_for(target_user: User, authed_user: AuthedUser, db_session: Ses
             db_session.add_all(enqueued_blocks)
             db_session.commit()
 
-    if block_following:
-        block_reason = f"followed_by:{target_user.id}"
+    if block_followed:
+        reason, reason_id = 3, target_user.id
         for followed_page in authed_user.get_followed_id_pages(target_user.id):
             enqueued_blocks = []
             for followed_id in followed_page:
                 new_block = enqueue_block(
-                    followed_id, block_reason, db_session, history_object=block_history,
-                    whitelisted_accounts=authed_user.followed_ids)
+                    user_id=followed_id, db_session=db_session, history_object=block_history,
+                    whitelisted_accounts=authed_user.followed_ids,
+                    reason=reason, reason_id=reason_id)
 
                 if not new_block[0]:
                     # row not created, reason noted in block_history object
@@ -393,30 +405,42 @@ def queue_blocks_for(target_user: User, authed_user: AuthedUser, db_session: Ses
 
 
 def queue_unblocks_for(target_user: User, db_session: Session, session_comment: str,
-                       unblock_target: bool = True, unblock_followers: bool = True,
-                       unblock_following: bool = False
-                      ) -> int:
+                       session_id: int, unblock_target: bool = True,
+                       unblock_followers: bool = True, unblock_followed: bool = False
+                       ) -> Tuple[int, int]:
     """"""
     reasons = []
     if unblock_target:
-        reasons.append(f"target:{target_user.id}")
+        reasons.append(f"user_id={target_user.id}")
     if unblock_followers:
-        reasons.append(f"follower_of:{target_user.id}")
-    if unblock_following:
-        reasons.append(f"followed_by:{target_user.id}")
+        reasons.append(f"reason=2 and reason_id={target_user.id}")
+    if unblock_followed:
+        reasons.append(f"reason=3 and reason_id={target_user.id}")
 
-
+    # surround each reason in parentheses and combine them into one query string
+    query_string = f"({') or ('.join(reasons)})"
 
     block_history = BlockHistory(
-        user_id=target_user.id, screen_name=target_user.screen_name,
-        followers=target_user.followers_count, following=target_user.friends_count, mode="unblock",
-        affect_target=unblock_target, affect_followers=unblock_followers,
-        affect_followed=unblock_following, time=time.time(), queued=0, skipped_blocked=0,
-        skipped_queued=0, skipped_following=0, comment=session_comment)
+        session=session_id,
+        user_id=target_user.id,
+        screen_name=target_user.screen_name,
+        followers=target_user.followers_count,
+        following=target_user.friends_count,
+        mode="unblock",
+        affect_target=unblock_target,
+        affect_followers=unblock_followers,
+        affect_followed=unblock_followed,
+        time=time.time(),
+        queued=0,
+        skipped_blocked=0,
+        skipped_queued=0,
+        skipped_following=0,
+        comment=session_comment
+    )
     db_session.add(block_history)
 
     # remove blocks from the queue
-    block_queue_query = db_session.query(BlockQueue).filter(BlockQueue.reason in reasons)
+    block_queue_query = db_session.query(BlockQueue).filter(sqla.text(query_string))
     cancelled_blocks_count = block_queue_query.count()
     if cancelled_blocks_count:
         LOGGER.info("removing %s blocks from block queue", cancelled_blocks_count)
@@ -424,7 +448,7 @@ def queue_unblocks_for(target_user: User, db_session: Session, session_comment: 
         db_session.commit()
 
     # actual unblock queueing happens here
-    block_list_query = db_session.query(BlockList).filter(BlockQueue.reason in reasons)
+    block_list_query = db_session.query(BlockList).filter(sqla.text(query_string))
     matching_blocks_count = block_list_query.count()
     if matching_blocks_count:
         LOGGER.info("Queueing unblocks for %s users", matching_blocks_count)
