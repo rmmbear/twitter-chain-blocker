@@ -5,12 +5,14 @@ import time
 import shutil
 import logging
 import datetime
-from typing import Optional
 
 from pathlib import Path
+from typing import Optional
 from argparse import ArgumentParser
 
 import tweepy
+from tweepy.models import User
+
 import sqlalchemy as sqla
 from sqlalchemy.orm import sessionmaker, Session
 
@@ -74,14 +76,13 @@ ARGP_REASON.add_argument(
     "account_name", type=str,
     help="Screen name of the account you want to query")
 
-#TODO: implement session comments, with the default comment being the time of the session's start
 
-def get_workdirs() -> dict:
-    """"""
+def get_workdirs(home: Optional[Path] = None, dirname: str = "Twitter Chainblocker") -> dict:
+    """Find and create all required directories"""
     paths = {}
-    dirname = "Twitter Chainblocker"
-    home = Path.home()
-    # do not clutter up people's home dir
+    if not home:
+        home = Path.home()
+
     if os.name == "posix":
         paths["data"] = home / f".local/share/{dirname}"
         paths["config"] = home / f".config/{dirname}"
@@ -96,6 +97,17 @@ def get_workdirs() -> dict:
     paths["data"] = home / f"{dirname}/data"
     paths["config"] = home / f"{dirname}/config"
     return paths
+
+
+def create_db_session(path: Path, name: str, suffix: str = "_blocklist.sqlite") -> Session:
+    """"""
+    LOGGER.info("Creating new db session")
+    dbfile = path / f"{name}{suffix}"
+    sqla_engine = sqla.create_engine(f"sqlite:///{str(dbfile)}", echo=False)
+    chainblocker.BlocklistDBBase.metadata.create_all(sqla_engine)
+    bound_session = sessionmaker(bind=sqla_engine)
+    db_session = bound_session()
+    return db_session
 
 
 def main(paths: dict, args: Optional[str] = None) -> None:
@@ -123,15 +135,8 @@ def main(paths: dict, args: Optional[str] = None) -> None:
             raise NotImplementedError(f"'{missing}' is not yet implemented")
 
     current_user = authenticate_interactive()
-
-    dbfile = paths["data"] / f"{current_user.user.id}_blocklist.sqlite"
-    sqla_engine = sqla.create_engine(f"sqlite:///{str(dbfile)}", echo=False)
-    chainblocker.BlocklistDBBase.metadata.create_all(sqla_engine)
-    bound_session = sessionmaker(bind=sqla_engine)
-
-    LOGGER.info("Creating new db session")
+    db_session = create_db_session(path=paths["data"], name=str(current_user.user.id))
     session_start = time.time()
-    db_session = bound_session()
 
     if args.command in ("unblock", "block"):
         session_id = db_session.\
@@ -146,7 +151,7 @@ def main(paths: dict, args: Optional[str] = None) -> None:
 
         #FIXME: expect errors when fetching users
         #https://developer.twitter.com/en/docs/basics/response-codes
-        #args.accounts = [current_user.get_user(screen_name=user) for user in args.accounts]
+        args.accounts = [current_user.get_user_by_name(user) for user in args.accounts]
 
     try:
         if chainblocker.Metadata.get_row("clean_exit", db_session, "1") == "0":
@@ -223,39 +228,74 @@ def authenticate_interactive() -> chainblocker.AuthedUser:
 
 def reason(target_user: str, authed_user: chainblocker.AuthedUser, db_session: Session) -> None:
     """"""
-    reason_string = \
-        "User: {} (ID={})\n" \
-        "Status: {}\n" \
-        "Reason: {}\n" \
-        #"Comment: {session_comment}\n"
-    twitter_user = authed_user.get_user(screen_name=target_user)
+    info_string = \
+        "User:    {} (ID={})\n" \
+        "Status:  {}\n" \
+        "Reason:  {}\n" \
+        "Session: {}\n" \
+        "Comment: {}\n"
+
+    #FIXME: expect errors retrieving users
+    twitter_user = authed_user.get_user_by_name(target_user)
     block_row = db_session.query(chainblocker.BlockList).filter(chainblocker.BlockList.user_id == twitter_user.id).one_or_none()
     if not block_row:
-        reason_string = reason_string.format(
-            twitter_user.screen_name, twitter_user.id, "Not in local block database!", "---")
-    else:
-        if block_row.reason == "target":
-            reason_full = "First in chain (blocking target)"
-        elif block_row.reason == "unknown":
-            reason_full = "Unknown, this block was not made using chainblocker"
-        else:
-            #FIXME: expect errors retrieving users
-            reason_user = authed_user.get_user(int(block_row.reason_id))
-            reason_full = f"{block_row.reason.replace('_', ' ' )} {reason_user.screen_name} (ID={block_row.reason_id})"
-        reason_string = reason_string.format(
+        info_string = info_string.format(
             twitter_user.screen_name, twitter_user.id,
-            time.strftime("Blocked on %Y/%m/%d %H:%M:%S", time.localtime(block_row.block_time)) if block_row.block_time else "Blocked on ???",
-            reason_full)
+            "Not in local block database!",
+            "N/A",
+            "N/A",
+            "N/A"
+        )
+    else:
+        status = time.strftime("Blocked on %Y/%m/%d %H:%M:%S", time.localtime(block_row.block_time))
+        assert isinstance(block_row.reason, int)
+        if block_row.reason == 0:
+            reason_str = "Unknown, this block was not made using chainblocker"
+            comment = "N/A"
+            session_info = "N/A"
+        else:
+            session = db_session.query(chainblocker.BlockHistory).\
+                filter(chainblocker.BlockHistory.session == block_row.session).one_or_none()
+            if session:
+                comment = session.comment
+                session_info = \
+                    f"This block was queued on " \
+                    f"{time.strftime('%Y/%m/%d %H:%M:%S', time.localtime(session.time))}" \
+                    f", along with {session.queued} other blocks"
+            else:
+                comment = "Unavailable"
+                session_info = "Unavailable"
 
-    print(reason_string)
+            if block_row.reason == 1:
+                reason_str = "This user was the first user in chain"
+            elif block_row.reason == 2:
+                #FIXME: expect errors retrieving users
+                reason_user = authed_user.get_user_by_id(block_row.reason_id)
+                reason_str = f"This user was following {reason_user.screen_name}"
+            elif block_row.reason == 3:
+                #FIXME: expect errors retrieving users
+                reason_user = authed_user.get_user_by_id(block_row.reason_id)
+                reason_str = f"This user was followed by {reason_user.screen_name}"
+            else:
+                assert False, f"Unknown reason encountered in blocklist DB: {block_row.reason}"
+                reason_str = "???"
+
+        info_string = info_string.format(
+            twitter_user.screen_name, twitter_user.id,
+            status,
+            reason_str,
+            session_info,
+            comment
+        )
+
+    print(info_string)
 
 
-def block(target_user: str, authed_user: chainblocker.AuthedUser, db_session: Session,
+def block(target_user: User, authed_user: chainblocker.AuthedUser, db_session: Session,
           session_comment: str, session_id: int, affect_target: bool, affect_followers: bool,
           affect_followed: bool
          ) -> None:
     """"""
-    target_user = authed_user.get_user(screen_name=target_user)
     print(target_user.screen_name, ": This user has", target_user.followers_count, "followers")
     LOGGER.info("Queueing blocks for followers of USER=%s ID=%s", target_user.screen_name, target_user.id)
     time_start = time.time()
@@ -285,13 +325,12 @@ def block(target_user: str, authed_user: chainblocker.AuthedUser, db_session: Se
     )
 
 
-def unblock(target_user: str, authed_user: chainblocker.AuthedUser, db_session: Session,
+def unblock(target_user: User, authed_user: chainblocker.AuthedUser, db_session: Session,
             session_comment: str, session_id: int, affect_target: bool, affect_followers: bool, affect_followed: bool
            ) -> None:
     """"""
     #FIXME: implement unblocking
     raise NotImplementedError()
-    target_user = authed_user.get_user(screen_name=target_user)
     cancelled, queued = chainblocker.queue_unblocks_for(
         target_user,
         db_session,

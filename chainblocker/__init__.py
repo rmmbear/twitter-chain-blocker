@@ -196,19 +196,13 @@ class AuthedUser:
         return self._followed_ids
 
 
-    def get_user(self, user_id: Optional[int] = None,
-                 screen_name: Optional[str] = None) -> User:
-        """"""
-        if not (user_id or screen_name):
-            raise ValueError("Either user id or screen name must be provided")
-        if user_id and not isinstance(user_id, int):
-            raise TypeError("User id must be an integer")
-        if screen_name and not isinstance(screen_name, str):
-            raise TypeError("Screen name must be a string")
+    def get_user_by_id(self, user_id: int) -> User:
+        """Convenience function for returning User obj using its id"""
+        return self.api.get_user(user_id=user_id)
 
-        if user_id:
-            return self.api.get_user(user_id=user_id)
 
+    def get_user_by_name(self, screen_name: str) -> User:
+        """Convenience function for returning User obj using its name"""
         return self.api.get_user(screen_name=screen_name)
 
 
