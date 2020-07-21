@@ -22,11 +22,12 @@ LOGGER = logging.getLogger(__name__)
 
 ARGPARSER = ArgumentParser(
     prog="chainblocker",
-    description="All account arguments must be passed in form of screen names (aka 'handles'), "
-                "and not display names or IDs. Screen names are resolved to IDs internally, which "
-                "means that this program will work even when blocked users change their account names. "
-                "If, for any reason, chainblocker was stopped while processing queues and you would "
-                "like to resume without adding anything to the queue, simply run it again without a command")
+    description=""
+        "All account arguments must be passed in form of screen names (aka 'handles'), "
+        "and not display names or IDs. Screen names are resolved to IDs internally, which "
+        "means that this program will work even when blocked users change their account names. "
+        "If, for any reason, chainblocker was stopped while processing queues and you would "
+        "like to resume without adding anything to the queue, simply run it again without a command")
 ### Top-level arguments
 ARGPARSER.add_argument(
     "--skip-blocklist-update", action="store_true",
@@ -37,7 +38,8 @@ ARGPARSER.add_argument(
 ARGPARSER.add_argument(
     "--only-queue-actions", action="store_true",
     help="Delay queueing accounts until next run and only store which actions to perform. "
-         "Useful if you want to issue different commands one after another, and don't want to wait for account queueing. "
+         "Useful if you want to issue different commands one after another, and don't want to "
+         "wait for account queueing. "
          "This option also disables blocklist update")
 ARGPARSER.add_argument(
     "--mode", type=str, default="target+followers",
@@ -47,7 +49,8 @@ ARGPARSER.add_argument(
          "Mode defaults to target+followers for both blocking and unblocking")
 ARGPARSER.add_argument(
     "--comment", type=str,
-    help="Set the comment for this batch operation. This comment will be displayed when querying block reason. "
+    help="Set the comment for this batch operation. "
+         "This comment will be displayed when querying block reason. "
          "If left empty, comment will be automatically set to "
          "'Session {year}/{month}/{day} {hours}:{minutes}:{seconds}, queried {number} accounts'")
 
@@ -71,7 +74,9 @@ ARGP_UNBLOCK.add_argument(
     help="List of screen names of accounts you wish to unblock.")
 
 ### Reason command
-ARGP_REASON = ARGP_COMMANDS.add_parser("reason", help="Check if you are blocking someone and display details of that block")
+ARGP_REASON = ARGP_COMMANDS.add_parser(
+    "reason",
+    help="Check if you are blocking someone and display details of that block")
 ARGP_REASON.add_argument(
     "account_name", type=str,
     help="Screen name of the account you want to query")
@@ -247,13 +252,15 @@ def reason(target_user: str, authed_user: chainblocker.AuthedUser, db_session: S
             "N/A"
         )
     else:
-        status = time.strftime("Blocked on %Y/%m/%d %H:%M:%S", time.localtime(block_row.block_time))
         assert isinstance(block_row.reason, int)
         if block_row.reason == 0:
+            status = "Blocked, details unknown"
             reason_str = "Unknown, this block was not made using chainblocker"
             comment = "N/A"
             session_info = "N/A"
         else:
+            status = time.strftime("Blocked on %Y/%m/%d %H:%M:%S",
+                                   time.localtime(block_row.block_time))
             session = db_session.query(chainblocker.BlockHistory).\
                 filter(chainblocker.BlockHistory.session == block_row.session).one_or_none()
             if session:
@@ -296,6 +303,7 @@ def block(target_user: User, authed_user: chainblocker.AuthedUser, db_session: S
           affect_followed: bool
          ) -> None:
     """"""
+    LOGGER.debug("queueing blocs")
     print(target_user.screen_name, ": This user has", target_user.followers_count, "followers")
     LOGGER.info("Queueing blocks for followers of USER=%s ID=%s", target_user.screen_name, target_user.id)
     time_start = time.time()
@@ -329,8 +337,7 @@ def unblock(target_user: User, authed_user: chainblocker.AuthedUser, db_session:
             session_comment: str, session_id: int, affect_target: bool, affect_followers: bool, affect_followed: bool
            ) -> None:
     """"""
-    #FIXME: implement unblocking
-    raise NotImplementedError()
+    LOGGER.debug("Queueing unblocks")
     cancelled, queued = chainblocker.queue_unblocks_for(
         target_user,
         db_session,
@@ -348,6 +355,7 @@ def unblock(target_user: User, authed_user: chainblocker.AuthedUser, db_session:
 
 def process_queues(authed_user: chainblocker.AuthedUser, db_session: Session) -> None:
     """"""
+    LOGGER.debug("Processing queues")
     #FIXME: do not count blocks and unblocks "in the future"
     blocked_accs = db_session.query(chainblocker.BlockList).count()
     queued_blocks = db_session.query(chainblocker.BlockQueue).count()
@@ -359,6 +367,7 @@ def process_queues(authed_user: chainblocker.AuthedUser, db_session: Session) ->
     print()
 
     if queued_unblocks:
+        LOGGER.debug("Processing unblock queue")
         print("Processing unblock queue")
         time_start = time.time()
         unblocked_num = chainblocker.process_block_queue(authed_user, db_session)
@@ -373,6 +382,7 @@ def process_queues(authed_user: chainblocker.AuthedUser, db_session: Session) ->
         LOGGER.info("processing + networking per unblock = %ss avg", unblocked_num / time_total)
 
     if queued_blocks:
+        LOGGER.debug("Processing block queue")
         print("Processing block queue")
         time_start = time.time()
         blocked_num = chainblocker.process_block_queue(authed_user, db_session)
@@ -407,4 +417,5 @@ if __name__ == "__main__":
             print("Chainblocker quit due to unexpected error!")
             print(f"Error: {exc}")
             print(f"Traceback has been saved to {str(EXCEPTION_LOG)}")
-            print("If this issue persists, please report it to the project's github repo: https://github.com/rmmbear/twitter-chain-blocker")
+            print("If this issue persists, please report it to the project's github repo:",
+                  "https://github.com/rmmbear/twitter-chain-blocker")
