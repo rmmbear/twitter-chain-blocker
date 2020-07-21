@@ -1,7 +1,6 @@
 """"""
 import time
 import logging
-import datetime
 
 from typing import Any, Generator, Iterable, List, Optional, Tuple
 
@@ -31,6 +30,7 @@ TH.setFormatter(LOG_FORMAT_TERM)
 LOGGER.addHandler(TH)
 
 BlocklistDBBase = declarative_base()
+
 
 class Metadata(BlocklistDBBase):
     """"""
@@ -166,12 +166,21 @@ class AuthedUser:
 
 
     @classmethod
-    def authenticate(cls, key: str, secret: str, auth_handler: tweepy.OAuthHandler = None) -> "AuthedUser":
+    def authenticate(cls, key: str, secret: str,
+                     auth_handler: tweepy.OAuthHandler = None) -> "AuthedUser":
         """"""
         if not auth_handler:
             auth_handler = tweepy.OAuthHandler(*cls.keys)
 
         auth_handler.set_access_token(key, secret)
+        return cls(auth_handler)
+
+
+    @classmethod
+    def authenticate_app(cls, key: str, secret: str,
+                         auth_handler: tweepy.OAuthHandler = None) -> "AuthedUser":
+        """"""
+        auth_handler = tweepy.OAuthHandler(*cls.keys)
         return cls(auth_handler)
 
 
@@ -256,7 +265,6 @@ def update_blocklist(authed_user: AuthedUser, db_session: Session, force: bool =
     #  but that still uses up the limited requests for this endpoint, which is the thing we want to
     #  avoid here)
     # there used to be a way of exporting twitter blocks, but that has been thrown out in the 2019 redesign
-    # though, it is still accessible through the old interface (use user-agent trick to get it)
     import_history = []
     imported_blocks_total = 0
     for blocked_id_page in authed_user.get_blocked_id_pages():
@@ -264,7 +272,7 @@ def update_blocklist(authed_user: AuthedUser, db_session: Session, force: bool =
         for blocked_id in blocked_id_page:
             matching_id_query = db_session.query(BlockList).filter(BlockList.user_id == blocked_id)
             if not db_session.query(matching_id_query.exists()).scalar():
-                db_session.add(BlockList(user_id=blocked_id, reason="unknown"))
+                db_session.add(BlockList(user_id=blocked_id, reason=0))
                 imported_blocks_page += 1
 
         import_history.append(imported_blocks_page)
