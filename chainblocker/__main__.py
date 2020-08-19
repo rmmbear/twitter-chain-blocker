@@ -66,7 +66,7 @@ ARGPARSER.add_argument(
 ARGPARSER.add_argument(
     "--override-api-keys", type=str, metavar="KEY,SECRET",
     help="Override api key and secret with your own. Argument must be passed as a string, key first "
-         "then secret, delimited with a comma: \"aaaaa,bbbbbbbbbb\". These an be obtained from "
+         "then secret, delimited with a comma: \"aaaaa,bbbbbbbbbb\". These can be obtained from "
          "https://developer.twitter.com/en/apps")
 
 
@@ -253,8 +253,13 @@ def override_api_keys(parsed_args: argparse.Namespace) -> None:
     #   both string are significant, file does not contain comments
     #   one is shorter (25 ascii characters) than the other (50 characters)
     if keys_file:
+        keys_file = Path(keys_file)
+        if not keys_file.is_file():
+            LOGGER.error("Could not find file: %s", keys_file)
+            sys.exit(f"Provided path is not a file: {str(keys_file)}")
+
         keys = []
-        with open(keys_file, mode="r") as f:
+        with keys_file.open(mode="r") as f:
             for line in f:
                 line = line.strip()
                 #ignore empty lines/whitespace
@@ -262,16 +267,36 @@ def override_api_keys(parsed_args: argparse.Namespace) -> None:
                     continue
 
                 keys.append(line.strip())
+
+        keys.sort(key=len)
     else:
         keys = keys.split(",", maxsplit=1)
         keys = [key.strip() for key in keys]
 
+    if len(keys) > 2:
+        LOGGER.error("Received % keys instead of 2")
+        sys.exit("Received more than two keys!")
+    if len(keys) < 2:
+        LOGGER.error("Received % keys instead of 2")
+        sys.exit("API key and/or secret not provided")
 
-    keys.sort(key=len)
-    LOGGER.debug("Received override_keys: %s", keys)
-    assert len(keys) == 2, "list length error"
-    assert not (set("".join(keys)) & set("".join((string.whitespace, string.punctuation)))), "bad characters"
-    assert len(keys[0]) == 25 and len(keys[1]) == 50, "key length error"
+    bad_characters = set("".join(keys)) & set("".join((string.whitespace, string.punctuation)))
+    if bad_characters:
+        LOGGER.error("Invalid characters in keys: %s", bad_characters)
+        print("Invalid characters encountered in keys: \"",
+              "\", \"".join(bad_characters), "\"", sep="")
+        sys.exit("Please ensure your keys have been copied correctly - both must be alphanumerical")
+
+    #TODO: confirm that this length assumption is true
+    # sadly, I have not found any details on this in twitter docs
+    # so this is based on what I got after regenerating app consumer keys a whole bunch of times
+    if len(keys[0]) != 25: #consumer api key
+        LOGGER.error("Provided consumer api key length is %s, but expected 25", len(keys[0]))
+        sys.exit(f"Invalid consumer API key - must be 25 characters long, got {len(keys[0])}")
+    if len(keys[1]) != 50: #consumer secret key
+        LOGGER.error("Provided consumer api key length is %s, but expected 50", len(keys[1]))
+        sys.exit(f"Invalid consumer API secret - must be 50 characters long, got {len(keys[1])}")
+
     #XXX: This assumes we will never re-import __init__
     chainblocker.AuthedUser.keys = keys
 
