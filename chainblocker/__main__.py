@@ -159,7 +159,7 @@ def main(paths: dict, args: Optional[str] = None) -> None:
         if getattr(args, missing, None):
             raise NotImplementedError(f"'{missing}' is not yet implemented")
 
-    if "override_api_keys" in args or "override_api_keys_file" in args:
+    if args.override_api_keys or args.override_api_keys_file:
         override_api_keys(args)
 
     current_user = authenticate_interactive()
