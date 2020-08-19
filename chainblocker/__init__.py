@@ -21,7 +21,7 @@ __all__ = [
 
 
 LOG_FORMAT_TERM = logging.Formatter("[%(levelname)s] %(message)s")
-LOGGER = logging.getLogger("ChainBlocker")
+LOGGER = logging.getLogger(__name__)
 LOGGER.setLevel(logging.DEBUG)
 TH = logging.StreamHandler()
 TH.setLevel(logging.DEBUG)

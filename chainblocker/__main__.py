@@ -3,12 +3,13 @@ import os
 import sys
 import time
 import shutil
+import string
 import logging
+import argparse
 import datetime
 
 from pathlib import Path
 from typing import Optional
-from argparse import ArgumentParser
 
 import tweepy
 from tweepy.models import User
@@ -19,15 +20,17 @@ from sqlalchemy.orm import sessionmaker, Session
 import chainblocker
 
 LOGGER = logging.getLogger(__name__)
+LOGGER.setLevel(logging.DEBUG)
 
-ARGPARSER = ArgumentParser(
+ARGPARSER = argparse.ArgumentParser(
     prog="chainblocker",
     description=""
         "All account arguments must be passed in form of screen names (aka 'handles'), "
         "and not display names or IDs. Screen names are resolved to IDs internally, which "
         "means that this program will work even when blocked users change their account names. "
         "If, for any reason, chainblocker was stopped while processing queues and you would "
-        "like to resume without adding anything to the queue, simply run it again without a command")
+        "like to resume without adding anything to the queue, simply run it again without any "
+        "arguments.")
 ### Top-level arguments
 ARGPARSER.add_argument(
     "--skip-blocklist-update", action="store_true",
@@ -45,14 +48,27 @@ ARGPARSER.add_argument(
     "--mode", type=str, default="target+followers",
     help="Set which parties will be affected in current batch of accounts. "
          "Options must be delimited with a '+' symbol. Possible options are: "
-         "target = the account named, followers = target's followers, followed = people followed by target. "
+         "target = the account passed to chainblocker,"
+         "followers = people following the target,"
+         "followed = people followed by target. "
          "Mode defaults to target+followers for both blocking and unblocking")
 ARGPARSER.add_argument(
     "--comment", type=str,
     help="Set the comment for this batch operation. "
          "This comment will be displayed when querying block reason. "
          "If left empty, comment will be automatically set to "
-         "'Session {year}/{month}/{day} {hours}:{minutes}:{seconds}, queried {number} accounts'")
+         "\"Session {year}/{month}/{day} {hours}:{minutes}:{seconds}, queried {number} accounts\"")
+ARGPARSER.add_argument(
+    "--override-api-keys-file", type=str, metavar="FILE",
+    help="Override default api keys with your own. Argument must be a path to textfile containing "
+         "both the key and secret (obtained from https://developer.twitter.com/en/apps). Both must "
+         "be on their separate lines, key first then secret.")
+ARGPARSER.add_argument(
+    "--override-api-keys", type=str, metavar="KEY,SECRET",
+    help="Override api key and secret with your own. Argument must be passed as a string, key first "
+         "then secret, delimited with a comma: \"aaaaa,bbbbbbbbbb\". These an be obtained from "
+         "https://developer.twitter.com/en/apps")
+
 
 ARGP_COMMANDS = ARGPARSER.add_subparsers(title="Commands", dest="command", metavar="")
 ### Block command
@@ -91,16 +107,17 @@ def get_workdirs(home: Optional[Path] = None, dirname: str = "Twitter Chainblock
     if os.name == "posix":
         paths["data"] = home / f".local/share/{dirname}"
         paths["config"] = home / f".config/{dirname}"
-        return paths
-
-    if os.name == "nt":
+    elif os.name == "nt":
         home = Path(os.path.expandvars("%APPDATA%"))
         paths["data"] = home / f"Local/{dirname}/data"
         paths["config"] = home / f"Local/{dirname}/config"
-        return paths
+    else:
+        paths["data"] = home / f"{dirname}/data"
+        paths["config"] = home / f"{dirname}/config"
 
-    paths["data"] = home / f"{dirname}/data"
-    paths["config"] = home / f"{dirname}/config"
+    for directory in paths.values():
+        directory.mkdir(exist_ok=True, parents=True)
+
     return paths
 
 
@@ -108,6 +125,7 @@ def create_db_session(path: Path, name: str, suffix: str = "_blocklist.sqlite") 
     """"""
     LOGGER.info("Creating new db session")
     dbfile = path / f"{name}{suffix}"
+    LOGGER.debug("dbfile = %s", dbfile)
     sqla_engine = sqla.create_engine(f"sqlite:///{str(dbfile)}", echo=False)
     chainblocker.BlocklistDBBase.metadata.create_all(sqla_engine)
     bound_session = sessionmaker(bind=sqla_engine)
@@ -118,7 +136,9 @@ def create_db_session(path: Path, name: str, suffix: str = "_blocklist.sqlite") 
 def main(paths: dict, args: Optional[str] = None) -> None:
     """"""
     args = ARGPARSER.parse_args(args)
-    print(args)
+    LOGGER.debug("argparsed namespace:")
+    LOGGER.debug("%s", args)
+
     args.mode = args.mode.split("+")
     if len(args.mode) > 3:
         sys.exit("ERROR: Received more than three targes for --mode\n"
@@ -138,6 +158,9 @@ def main(paths: dict, args: Optional[str] = None) -> None:
     for missing in NOT_IMPLEMENTED:
         if getattr(args, missing, None):
             raise NotImplementedError(f"'{missing}' is not yet implemented")
+
+    if "override_api_keys" in args or "override_api_keys_file" in args:
+        override_api_keys(args)
 
     current_user = authenticate_interactive()
     db_session = create_db_session(path=paths["data"], name=str(current_user.user.id))
@@ -213,6 +236,46 @@ def main(paths: dict, args: Optional[str] = None) -> None:
         db_session.close()
 
 
+def override_api_keys(parsed_args: argparse.Namespace) -> None:
+    """Replace api keys in AuthedUser with those provided by the user."""
+    keys = getattr(parsed_args, "override_api_keys", None)
+    keys_file = getattr(parsed_args, "override_api_keys_file", None)
+
+    if keys and keys_file:
+        sys.exit(
+            "Using two different key overrides (--override-api-keys-file and --override-api-keys)\n"
+            "Please use only one of these methods!"
+        )
+
+    # read the keys file
+    # assumptions:
+    #   file contains two lines of alphanumeric strings
+    #   both string are significant, file does not contain comments
+    #   one is shorter (25 ascii characters) than the other (50 characters)
+    if keys_file:
+        keys = []
+        with open(keys_file, mode="r") as f:
+            for line in f:
+                line = line.strip()
+                #ignore empty lines/whitespace
+                if not line:
+                    continue
+
+                keys.append(line.strip())
+    else:
+        keys = keys.split(",", maxsplit=1)
+        keys = [key.strip() for key in keys]
+
+
+    keys.sort(key=len)
+    LOGGER.debug("Received override_keys: %s", keys)
+    assert len(keys) == 2, "list length error"
+    assert not (set("".join(keys)) & set("".join((string.whitespace, string.punctuation)))), "bad characters"
+    assert len(keys[0]) == 25 and len(keys[1]) == 50, "key length error"
+    #XXX: This assumes we will never re-import __init__
+    chainblocker.AuthedUser.keys = keys
+
+
 def authenticate_interactive() -> chainblocker.AuthedUser:
     """"""
     auth_handler = tweepy.OAuthHandler(*chainblocker.AuthedUser.keys)
@@ -221,7 +284,10 @@ def authenticate_interactive() -> chainblocker.AuthedUser:
     print(f"Authnetication is required before we can continue.")
     print(f"Please go to the following url and authorize the app")
     print(f"{auth_url}")
-    auth_pin = input("Please paste the PIN here: ").strip()
+    try:
+        auth_pin = input("Please paste the PIN here: ").strip()
+    except KeyboardInterrupt:
+        sys.exit("\nReceived KeyboardInterrupt, exiting")
     #FIXME: perform error-checking, check input
     #FIXME: expect authentication errors
     access_token = auth_handler.get_access_token(auth_pin)
@@ -242,7 +308,11 @@ def reason(target_user: str, authed_user: chainblocker.AuthedUser, db_session: S
 
     #FIXME: expect errors retrieving users
     twitter_user = authed_user.get_user_by_name(target_user)
-    block_row = db_session.query(chainblocker.BlockList).filter(chainblocker.BlockList.user_id == twitter_user.id).one_or_none()
+    block_row = db_session.query(
+        chainblocker.BlockList).filter(
+            chainblocker.BlockList.user_id == twitter_user.id
+        ).one_or_none()
+
     if not block_row:
         info_string = info_string.format(
             twitter_user.screen_name, twitter_user.id,
@@ -334,7 +404,8 @@ def block(target_user: User, authed_user: chainblocker.AuthedUser, db_session: S
 
 
 def unblock(target_user: User, authed_user: chainblocker.AuthedUser, db_session: Session,
-            session_comment: str, session_id: int, affect_target: bool, affect_followers: bool, affect_followed: bool
+            session_comment: str, session_id: int, affect_target: bool, affect_followers: bool,
+            affect_followed: bool
            ) -> None:
     """"""
     LOGGER.debug("Queueing unblocks")
@@ -389,7 +460,11 @@ def process_queues(authed_user: chainblocker.AuthedUser, db_session: Session) ->
         time_total = time.time() - time_start
 
         time_str = str(datetime.timedelta(seconds=time_total))
-        print(f"Processed {blocked_num} out of {queued_blocks} blocks ({blocked_num / queued_blocks * 100:.2f}%)")
+        print(
+            f"Processed {blocked_num} "
+            f"out of {queued_blocks} blocks "
+            f"({blocked_num / queued_blocks * 100:.2f}%)"
+        )
         print(f"This took {time_str}")
         print()
         LOGGER.info("Processed %s out of %s blocks)", blocked_num, queued_blocks)
@@ -399,8 +474,6 @@ def process_queues(authed_user: chainblocker.AuthedUser, db_session: Session) ->
 
 if __name__ == "__main__":
     PATHS = get_workdirs()
-    for directory in PATHS.values():
-        directory.mkdir(exist_ok=True)
 
     FH = logging.FileHandler(PATHS["data"] / "chainblocker.log", mode="w")
     FH.setLevel(logging.DEBUG)
