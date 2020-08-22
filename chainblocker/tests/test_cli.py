@@ -43,7 +43,7 @@ class DummyTwitterUser():
 
     def __enter__(self) -> "DummyTwitterUser":
         self.__class__.users = {}
-        self.__class__._id = 0
+        self.__class__.id = 0
         cli.authenticate_interactive = self.__class__
         return self
 
@@ -53,7 +53,7 @@ class DummyTwitterUser():
 
 
     @property
-    def user(self):
+    def user(self) -> SimpleNamespace:
         user_namespace = SimpleNamespace(
             id=self.id,
             screen_name=self.screen_name,
@@ -91,7 +91,7 @@ class DummyBlocklistDBSession():
 
 
     def __init__(self) -> None:
-        assert not self.current_session, "Only one instance should ever be active"
+        assert not self.current_session, "Only one instance should ever be active at a time"
 
         LOGGER.info("Creating in-memory blocklist db session")
         sqla_engine = sqla.create_engine("sqlite:///:memory:", echo=True)
