@@ -257,14 +257,17 @@ def update_blocklist(authed_user: AuthedUser, db_session: Session, force: bool =
     min_delay = 3600 # wait at least an hour before updating blocklist
     last_update_time = float(last_update_row.val)
     if (time.time() - last_update_time) < min_delay and not force:
+        LOGGER.debug("Skipping blocklist update")
         return
 
+    LOGGER.info("Starting blocklist update")
     #FIXME: if we don't yet have any blocked accounts, this will go through __all__ of them
     # there isn't a way of telling how many blocks a user has, other than going through all of them
     # (well, technically it could be possible to manually mess with cursoring on /get/blocks/ids,
     #  but that still uses up the limited requests for this endpoint, which is the thing we want to
     #  avoid here)
-    # there used to be a way of exporting twitter blocks, but that has been thrown out in the 2019 redesign
+    # there used to be a way of exporting twitter blocks, but that has been thrown out in the
+    # 2019 redesign
     import_history = []
     imported_blocks_total = 0
     for blocked_id_page in authed_user.get_blocked_id_pages():
@@ -327,6 +330,7 @@ def queue_blocks_for(target_user: User, authed_user: AuthedUser, db_session: Ses
                      block_followers: bool = True, block_followed: bool = False
                     ) -> int:
     """"""
+    LOGGER.debug("Queueing blocks for target user %s", target_user.id)
     if not (block_followers or block_target or block_followed):
         raise RuntimeError("Bad arguments - no blocks will be queued")
 
@@ -411,6 +415,7 @@ def queue_unblocks_for(target_user: User, db_session: Session, session_comment: 
                        unblock_followers: bool = True, unblock_followed: bool = False
                        ) -> Tuple[int, int]:
     """"""
+    LOGGER.debug("Queueing unblocks for target user %s", target_user.id)
     reasons = []
     if unblock_target:
         reasons.append(f"user_id={target_user.id}")
@@ -478,19 +483,25 @@ def queue_unblocks_for(target_user: User, db_session: Session, session_comment: 
 
 def process_block_queue(authed_user: AuthedUser, db_session: Session, batch_size: int = 20) -> int:
     """"""
+    LOGGER.debug("Starting block queue processing")
     time_start = time.time()
     queued_count = db_session.query(BlockQueue).count()
     if not queued_count:
         return 0
 
     blocked_num = 0
-    queue_query = db_session.query(BlockQueue).filter(BlockQueue.queued_at <= time_start).order_by(BlockQueue.queued_at.desc())
+    queue_query = db_session.query(BlockQueue).\
+        filter(BlockQueue.queued_at <= time_start).order_by(BlockQueue.queued_at.desc())
+
     while db_session.query(queue_query.exists()).scalar():
         batch = queue_query.limit(batch_size).all()
         try:
             for queued_block in batch:
                 if authed_user.followed_ids and queued_block.user_id in authed_user.followed_ids:
-                    LOGGER.warning("Found whitelisted account in block queue, skipping: %s", queued_block.user_id)
+                    LOGGER.warning(
+                        "Found whitelisted account in block queue, skipping: %s",
+                        queued_block.user_id
+                    )
                     continue
 
                 try:
@@ -498,27 +509,36 @@ def process_block_queue(authed_user: AuthedUser, db_session: Session, batch_size
                 except tweepy.error.TweepError as err:
                     if err.api_code == 50:
                         # https://developer.twitter.com/en/docs/basics/response-codes
-                        # code 50 means "user not found" but when inspecting ids for which this error was thrown
+                        # code 50 means "user not found" but when inspecting ids for which this
+                        # error was thrown
                         # web twitter reported the users as suspended
                         # it's possible that 50 means permanent suspension/account deletion
                         # update: that's exactly what this means
-                        LOGGER.warning("User suspended permanently or account deleted (code 50): %s", queued_block.user_id)
+                        LOGGER.warning(
+                            "User suspended permanently or account deleted (code 50): %s",
+                            queued_block.user_id
+                        )
                         blocked_num += 1
                         db_session.delete(queued_block)
                         db_session.commit()
                         continue
 
                     if err.api_code == 63:
-                        LOGGER.warning("User suspended (code 63), delaying block: %s", queued_block.user_id)
+                        LOGGER.warning(
+                            "User suspended (code 63), delaying block: %s", queued_block.user_id
+                        )
                         queued_block.queued_at += 86400 # wait a day before before re-attempting to block
                         db_session.commit()
                         continue
-                    #tweepy.error.TweepError: Failed to send request: ('Connection aborted.', ConnectionResetError(104, 'Connection reset by peer'))
+                    #tweepy.error.TweepError:
+                    #    Failed to send request:
+                    #        ('Connection aborted.', ConnectionResetError(104, 'Connection reset by peer'))
                     # ^ err.api_code and err.response are None
                     #FIXME: handle network errors by exiting early
                     raise
                 except:
-                    LOGGER.error("Uncaught exception while trying to block user id %s", queued_block.user_id)
+                    LOGGER.error(
+                        "Uncaught exception while trying to block user id %s", queued_block.user_id)
                     raise
 
                 block_row = BlockList(
@@ -541,15 +561,19 @@ def process_block_queue(authed_user: AuthedUser, db_session: Session, batch_size
 
 
 def db_maintenance(db_session: Session) -> None:
+    """"""
+    LOGGER.info("Starting db maintenance")
     ###Clean orphaned blocks in queue
     last_user_id = 0
-    block_queue_query = db_session.query(BlockQueue).filter(BlockQueue.user_id > last_user_id).order_by(BlockQueue.user_id)
+    block_queue_query = db_session.query(BlockQueue).\
+        filter(BlockQueue.user_id > last_user_id).order_by(BlockQueue.user_id)
     LOGGER.info("Cleaning up block queue...")
     print("Cleaning up block queue...")
     while db_session.query(block_queue_query.exists()).scalar():
         for queued_block in block_queue_query.limit(1000).all():
             last_user_id = queued_block.user_id
-            matching_id_query = db_session.query(BlockList).filter(BlockList.user_id == queued_block.user_id)
+            matching_id_query = db_session.query(BlockList).\
+                filter(BlockList.user_id == queued_block.user_id)
             if db_session.query(matching_id_query.exists()).scalar():
                 # remove block from queue if it has already been blocked
                 # this can happen after blocklist update or early exit in process_queue
@@ -557,7 +581,8 @@ def db_maintenance(db_session: Session) -> None:
                 db_session.delete(queued_block)
 
         db_session.commit()
-        block_queue_query = db_session.query(BlockQueue).filter(BlockQueue.user_id > last_user_id).order_by(BlockQueue.user_id)
+        block_queue_query = db_session.query(BlockQueue).\
+            filter(BlockQueue.user_id > last_user_id).order_by(BlockQueue.user_id)
 
     #TODO: ^ do the same for unblocks
     ###Clean orphaned unblocks in queue
