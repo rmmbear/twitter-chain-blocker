@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Optional
 
 import tweepy
-from tweepy.models import User
 
 import sqlalchemy as sqla
 from sqlalchemy.orm import sessionmaker, Session
@@ -27,7 +26,7 @@ ARGPARSER = argparse.ArgumentParser(
     description=""
         "All account arguments must be passed in form of screen names (aka 'handles'), "
         "and not display names or IDs. Screen names are resolved to IDs internally, which "
-        "means that this program will work even when blocked users change their account names. "
+        "means that this program will work even when blocked users change their account name. "
         "If, for any reason, chainblocker was stopped while processing queues and you would "
         "like to resume without adding anything to the queue, simply run it again without any "
         "arguments.")
@@ -133,6 +132,26 @@ def create_db_session(path: Path, name: str, suffix: str = "_blocklist.sqlite") 
     return db_session
 
 
+def authenticate_interactive() -> chainblocker.AuthedUser:
+    """"""
+    auth_handler = tweepy.OAuthHandler(*chainblocker.AuthedUser.keys)
+    auth_url = auth_handler.get_authorization_url()
+    print(f"Authnetication is required before we can continue.")
+    print(f"Please go to the following url and authorize the app")
+    print(f"{auth_url}")
+    try:
+        auth_pin = input("Please paste the PIN here: ").strip()
+    except KeyboardInterrupt:
+        sys.exit("\nReceived KeyboardInterrupt, exiting")
+    #FIXME: perform error-checking, check input
+    #FIXME: expect authentication errors
+    access_token = auth_handler.get_access_token(auth_pin)
+    auth_handler.set_access_token(*access_token)
+    authed_user = chainblocker.AuthedUser(auth_handler)
+    print(f"Authentication successful for user '{authed_user.user.screen_name}'\n")
+    return authed_user
+
+
 def main(paths: dict, args: Optional[str] = None) -> None:
     """"""
     args = ARGPARSER.parse_args(args)
@@ -162,72 +181,58 @@ def main(paths: dict, args: Optional[str] = None) -> None:
     if args.override_api_keys or args.override_api_keys_file:
         override_api_keys(args)
 
+    ### only operations working with user context past this point
     current_user = authenticate_interactive()
     db_session = create_db_session(path=paths["data"], name=str(current_user.user.id))
     session_start = time.time()
 
-    if args.command in ("unblock", "block"):
-        session_id = db_session.\
-            query(sqla.sql.func.max(chainblocker.BlockHistory.session)).one_or_none()[0]
-        if not session_id:
-            session_id = 1
-        else:
-            session_id += 1
-
-        if not args.comment:
-            args.comment = time.strftime(f"Session %Y/%m/%d %H:%M:%S, queried {len(args.accounts)} accounts")
-
-        #FIXME: expect errors when fetching users
-        #https://developer.twitter.com/en/docs/basics/response-codes
-        args.accounts = [current_user.get_user_by_name(user) for user in args.accounts]
-
     try:
-        if chainblocker.Metadata.get_row("clean_exit", db_session, "1") == "0":
-            LOGGER.warning("Exception encountered in last session, performing maintenance")
-            print("Exception encountered in last session, performing maintenance")
-            chainblocker.db_maintenance(db_session)
-
         if args.command == "reason":
             reason(target_user=args.account_name, authed_user=current_user, db_session=db_session)
 
-        if args.command == "unblock":
-            for unblock_target in args.accounts:
-                unblock(
-                    target_user=unblock_target,
-                    authed_user=current_user,
-                    db_session=db_session,
-                    affect_target=args.affect_target,
-                    affect_followers=args.affect_followers,
-                    affect_followed=args.affect_followed,
-                    session_comment=args.comment,
-                    session_id=session_id
-                )
+        #FIXME: reduce complexity
+        if args.command in ("block", "unblock"):
+            if args.command == "block":
+                if not args.skip_blocklist_update and not args.only_queue_actions:
+                    print("Updating account's blocklist, this might take a while...")
+                    chainblocker.update_blocklist(current_user, db_session)
+                    print("Blocklist update complete\n")
 
-        if args.command == "block":
-            if not args.skip_blocklist_update and not args.only_queue_actions:
-                print("Updating account's blocklist, this might take a while...")
-                chainblocker.update_blocklist(current_user, db_session)
-                print("Blocklist update complete\n")
+            if not args.comment:
+                args.comment = time.strftime(
+                    f"Session %Y/%m/%d %H:%M:%S, queried {len(args.accounts)} accounts")
 
-            for block_target in args.accounts:
-                block(
-                    target_user=block_target,
-                    authed_user=current_user,
-                    db_session=db_session,
-                    affect_target=args.affect_target,
-                    affect_followers=args.affect_followers,
-                    affect_followed=args.affect_followed,
-                    session_comment=args.comment,
-                    session_id=session_id
-                )
+            args.session_id = db_session.\
+                query(sqla.sql.func.max(chainblocker.BlockHistory.session)).one_or_none()[0]
+            if not args.session_id:
+                args.session_id = 1
+            else:
+                args.session_id += 1
+            #FIXME: expect errors when fetching users
+            #https://developer.twitter.com/en/docs/basics/response-codes
+            LOGGER.info("Fetching target accounts")
+            print("Fetching target accounts...")
+            args.accounts = [current_user.get_user_by_name(user) for user in args.accounts]
+
+            queue(
+                authed_user=current_user,
+                db_session=db_session,
+                parsed_args=args,
+            )
 
         if not args.only_queue_accounts and not args.only_queue_actions and args.command != "reason":
+            chainblocker.clean_duplicate_blocks(db_session)
             process_queues(current_user, db_session)
+            ###Vacuum the database
+            LOGGER.info("Vacuuming database...")
+            print("Vacuuming database...")
+            db_session.execute(sqla.text("VACUUM"))
+
 
         chainblocker.Metadata.set_row("clean_exit", 1, db_session)
     # did you know that pylint does not report any errors from bare except blocks? I didn't
     except Exception as exc:
-        LOGGER.error("Uncaught exception, rolling back db session")
+        LOGGER.error("Uncaught exception \"%s\", rolling back db session", exc)
         db_session.rollback()
         chainblocker.Metadata.set_row("clean_exit", 0, db_session)
         raise exc
@@ -294,32 +299,11 @@ def override_api_keys(parsed_args: argparse.Namespace) -> None:
         LOGGER.error("Provided consumer api key length is %s, but expected 25", len(keys[0]))
         sys.exit(f"Invalid consumer API key - must be 25 characters long, got {len(keys[0])}")
     if len(keys[1]) != 50: #consumer secret key
-        LOGGER.error("Provided consumer api key length is %s, but expected 50", len(keys[1]))
+        LOGGER.error("Provided consumer secret length is %s, but expected 50", len(keys[1]))
         sys.exit(f"Invalid consumer API secret - must be 50 characters long, got {len(keys[1])}")
 
     #XXX: This assumes we will never re-import __init__
     chainblocker.AuthedUser.keys = keys
-
-
-def authenticate_interactive() -> chainblocker.AuthedUser:
-    """"""
-    auth_handler = tweepy.OAuthHandler(*chainblocker.AuthedUser.keys)
-    #TODO: implement key override - allow people to use their own keys for app-auth
-    auth_url = auth_handler.get_authorization_url()
-    print(f"Authnetication is required before we can continue.")
-    print(f"Please go to the following url and authorize the app")
-    print(f"{auth_url}")
-    try:
-        auth_pin = input("Please paste the PIN here: ").strip()
-    except KeyboardInterrupt:
-        sys.exit("\nReceived KeyboardInterrupt, exiting")
-    #FIXME: perform error-checking, check input
-    #FIXME: expect authentication errors
-    access_token = auth_handler.get_access_token(auth_pin)
-    auth_handler.set_access_token(*access_token)
-    authed_user = chainblocker.AuthedUser(auth_handler)
-    print(f"Authentication successful for user '{authed_user.user.screen_name}'\n")
-    return authed_user
 
 
 def reason(target_user: str, authed_user: chainblocker.AuthedUser, db_session: Session) -> None:
@@ -357,7 +341,12 @@ def reason(target_user: str, authed_user: chainblocker.AuthedUser, db_session: S
             status = time.strftime("Blocked on %Y/%m/%d %H:%M:%S",
                                    time.localtime(block_row.block_time))
             session = db_session.query(chainblocker.BlockHistory).\
-                filter(chainblocker.BlockHistory.session == block_row.session).one_or_none()
+                filter(
+                    sqla.and_(
+                        chainblocker.BlockHistory.session == block_row.session,
+                        chainblocker.BlockHistory.user_id == block_row.reason_id,
+                    )
+                ).one_or_none()
             if session:
                 comment = session.comment
                 session_info = \
@@ -380,7 +369,7 @@ def reason(target_user: str, authed_user: chainblocker.AuthedUser, db_session: S
                 reason_str = f"This user was followed by {reason_user.screen_name}"
             else:
                 assert False, f"Unknown reason encountered in blocklist DB: {block_row.reason}"
-                reason_str = "???"
+                reason_str = str(block_row.reason)
 
         info_string = info_string.format(
             twitter_user.screen_name, twitter_user.id,
@@ -393,60 +382,62 @@ def reason(target_user: str, authed_user: chainblocker.AuthedUser, db_session: S
     print(info_string)
 
 
-def block(target_user: User, authed_user: chainblocker.AuthedUser, db_session: Session,
-          session_comment: str, session_id: int, affect_target: bool, affect_followers: bool,
-          affect_followed: bool
+def queue(authed_user: chainblocker.AuthedUser, db_session: Session,
+          parsed_args: argparse.Namespace,
          ) -> None:
     """"""
-    LOGGER.debug("queueing blocs")
-    print(target_user.screen_name, ": This user has", target_user.followers_count, "followers")
-    LOGGER.info("Queueing blocks for followers of USER=%s ID=%s", target_user.screen_name, target_user.id)
-    time_start = time.time()
-    block_history = chainblocker.queue_blocks_for(
-        target_user=target_user,
-        authed_user=authed_user,
-        db_session=db_session,
-        block_target=affect_target,
-        block_followers=affect_followers,
-        block_followed=affect_followed,
-        session_comment=session_comment,
-        session_id=session_id
-    )
+    if parsed_args.command == "unblock":
+        for unblock_target in parsed_args.accounts:
+            cancelled, queued = chainblocker.queue_unblocks_for(
+                unblock_target,
+                db_session,
+                unblock_target=parsed_args.affect_target,
+                unblock_followers=parsed_args.affect_followers,
+                unblock_followed=parsed_args.affect_followed,
+                session_comment=parsed_args.comment,
+                session_id=parsed_args.session_id
+            )
+            LOGGER.info("QUEUEING STATS:")
+            LOGGER.info("QUEUEING STATS:")
+            print(f"Cancelled blocks: {cancelled}")
+            print(f"Queued unblocks:  {queued}")
+            print()
+    elif parsed_args.command == "block":
+        LOGGER.debug("queueing blocks")
+        for block_target in parsed_args.accounts:
+            time_start = time.time()
+            LOGGER.info("Queueing blocks for followers of USER=%s ID=%s",
+                        block_target.screen_name, block_target.id
+                       )
+            print(block_target.screen_name, ": This user has",
+                  block_target.followers_count, "followers"
+                 )
+            block_history = chainblocker.queue_blocks_for(
+                target_user=block_target,
+                authed_user=authed_user,
+                db_session=db_session,
+                block_target=parsed_args.affect_target,
+                block_followers=parsed_args.affect_followers,
+                block_followed=parsed_args.affect_followed,
+                session_comment=parsed_args.comment,
+                session_id=parsed_args.session_id
+            )
 
-    time_total = time.time() - time_start
-    time_str = str(datetime.timedelta(seconds=time_total))
-    print(f"Queued:          {block_history.queued}")
-    print(f"Already queued:  {block_history.skipped_queued}")
-    print(f"Already blocked: {block_history.skipped_blocked}")
-    print(f"Following:       {block_history.skipped_following}")
-    print(f"This took:       {time_str}")
-    print()
-    LOGGER.info(
-        "Stats: queued=%s, skipped_blocked=%s, skipped_queued=%s, skipped_following=%s, time=%s",
-        block_history.queued, block_history.skipped_blocked, block_history.skipped_queued,
-        block_history.skipped_following, time_str
-    )
+            time_total = time.time() - time_start
+            time_str = str(datetime.timedelta(seconds=time_total))
+            LOGGER.info("QUEUEING STATS:")
+            LOGGER.info("queued_blocks: queued=%s", block_history.queued)
+            LOGGER.info("skipped_blocked=%s", block_history.skipped_blocked)
+            LOGGER.info("skipped_queued=%s", block_history.skipped_queued)
+            LOGGER.info("skipped_following=%s", block_history.skipped_following)
+            LOGGER.info("time=%s", time_str)
 
-
-def unblock(target_user: User, authed_user: chainblocker.AuthedUser, db_session: Session,
-            session_comment: str, session_id: int, affect_target: bool, affect_followers: bool,
-            affect_followed: bool
-           ) -> None:
-    """"""
-    LOGGER.debug("Queueing unblocks")
-    cancelled, queued = chainblocker.queue_unblocks_for(
-        target_user,
-        db_session,
-        unblock_target=affect_target,
-        unblock_followers=affect_followers,
-        unblock_followed=affect_followed,
-        session_comment=session_comment,
-        session_id=session_id
-    )
-
-    print(f"Cancelled blocks: {cancelled}")
-    print(f"Queued unblocks:  {queued}")
-    print()
+            print(f"Queued:          {block_history.queued}")
+            print(f"Already queued:  {block_history.skipped_queued}")
+            print(f"Already blocked: {block_history.skipped_blocked}")
+            print(f"Following:       {block_history.skipped_following}")
+            print(f"This took:       {time_str}")
+            print()
 
 
 def process_queues(authed_user: chainblocker.AuthedUser, db_session: Session) -> None:
@@ -499,7 +490,6 @@ def process_queues(authed_user: chainblocker.AuthedUser, db_session: Session) ->
 
 if __name__ == "__main__":
     PATHS = get_workdirs()
-
     FH = logging.FileHandler(PATHS["data"] / "chainblocker.log", mode="w")
     FH.setLevel(logging.DEBUG)
     FH.setFormatter(logging.Formatter("[%(levelname)s] %(asctime)s: %(message)s"))
