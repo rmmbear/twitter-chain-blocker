@@ -10,15 +10,7 @@ from tweepy.models import User
 import sqlalchemy as sqla
 from sqlalchemy.orm import Session
 from sqlalchemy.ext.declarative import declarative_base
-
-__all__ = [
-    "AuthedUser", "BlockHistory", "BlockList", "BlockQueue",
-    "BlocklistDBBase", "Metadata", "TopQueue", "UnblockQueue",
-    "db_maintenance", "declarative_base",
-    "enqueue_block", "process_block_queue", "queue_blocks_for",
-    "queue_unblocks_for", "update_blocklist",
-    ]
-
+from sqlalchemy.orm.decl_api import DeclarativeMeta
 
 LOG_FORMAT_TERM = logging.Formatter("[%(levelname)s] %(message)s")
 LOGGER = logging.getLogger(__name__)
@@ -29,7 +21,61 @@ TH.setFormatter(LOG_FORMAT_TERM)
 
 LOGGER.addHandler(TH)
 
-BlocklistDBBase = declarative_base()
+BlocklistDBBase: DeclarativeMeta = declarative_base()
+
+
+class RepeatUntilSuccess():
+    success_count = 0
+    err_count = 0
+    err_timeout = 30
+    err_timeout_incr = 10
+    err_delay_mult = 0
+    __slots__ = ("orig_attr",)
+
+    def __init__(self, attr: Any) -> None:
+        self.orig_attr = attr
+
+
+    def __getattr__(self, name: str) -> Any:
+        return self.orig_attr.__getattribute__(name)
+
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        while True:
+            try:
+                ret = self.orig_attr(*args, **kwargs)
+                self.__class__.success_count += 1
+                if self.err_delay_mult and self.success_count >= 200:
+                    self.__class__.err_delay_mult -= 1
+                    self.__class__.success_count = 0
+
+                return ret
+            except tweepy.error.TweepError as err:
+                LOGGER.error("Err: %s", err)
+                if err.api_code is None:
+                    sleep_time = self.err_timeout + (self.err_timeout_incr * self.err_delay_mult)
+                    LOGGER.error("Sleeping for %s", sleep_time)
+                    time.sleep(sleep_time)
+                    self.__class__.err_count += 1
+                    self.__class__.err_delay_mult += 1
+                    self.__class__.success_count = 0
+                    continue
+
+                raise err
+
+
+class API(tweepy.API):
+    __slots__ = ()
+    def __getattribute__(self, name: str) -> Any:
+        attr = super().__getattribute__(name)
+        repeatable = [
+            "create_block", "get_user", "get_followed_ids",
+            "friends_ids", "followers_ids", "blocks_ids"
+        ]
+        if name in (repeatable):
+            attr = RepeatUntilSuccess(attr)
+
+        return attr
 
 
 class Metadata(BlocklistDBBase):
@@ -112,9 +158,9 @@ class UnblockQueue(BlocklistDBBase):
     session = sqla.Column(sqla.Integer) # id of existing BlockHistory row
 
 
-class TopQueue(BlocklistDBBase):
+class TaskQueue(BlocklistDBBase):
     """"""
-    __tablename__ = "top_queue"
+    __tablename__ = "task_queue"
     id = sqla.Column(sqla.Integer, primary_key=True)
     user_id = sqla.Column(sqla.Integer)
     screen_name = sqla.Column(sqla.String)
@@ -155,7 +201,7 @@ class AuthedUser:
         # possibly store rate limit data in db?
         # update rate limits on the fly by accessing api.last_response
         #self.rate_limits = {}
-        self.api = tweepy.API(
+        self.api = API(
             auth,
             wait_on_rate_limit=True,
             wait_on_rate_limit_notify=True,
@@ -198,8 +244,7 @@ class AuthedUser:
         """List of users currently followed by autheduser"""
         # only refresh the list if two hours have passed
         if self._followed_update_time + (3600 * 2) <= time.time():
-            #this is a necessary use of a comprehension, pylint
-            self._followed_ids = [x for x in self.get_followed_ids(self.user.id)]
+            self._followed_ids = list(self.get_followed_ids(self.user.id))
             self._followed_update_time = time.time()
 
         return self._followed_ids
@@ -207,6 +252,7 @@ class AuthedUser:
 
     def get_user_by_id(self, user_id: int) -> User:
         """Convenience function for returning User obj using its id"""
+        #FIXME: expect incorrect
         return self.api.get_user(user_id=user_id)
 
 
@@ -217,7 +263,9 @@ class AuthedUser:
 
     def get_follower_id_pages(self, user_id: int) -> Generator[Iterable[int], None, None]:
         """Requires app authentication"""
-        for loop_num, follower_page in enumerate(tweepy.Cursor(self.api.followers_ids, user_id=user_id).pages()):
+        for loop_num, follower_page in enumerate(
+            tweepy.Cursor(self.api.followers_ids, user_id=user_id
+        ).pages()):
             print("Requested follower page #", loop_num+1, sep="")
             yield follower_page
 
@@ -231,7 +279,9 @@ class AuthedUser:
 
     def get_followed_id_pages(self, user_id: int) -> Generator[List[int], None, None]:
         """Requires app authentication"""
-        for loop_num, followed_page in enumerate(tweepy.Cursor(self.api.friends_ids, user_id=user_id).pages()):
+        for loop_num, followed_page in enumerate(
+            tweepy.Cursor(self.api.friends_ids, user_id=user_id
+        ).pages()):
             print("Requested followed page #", loop_num+1, sep="")
             yield followed_page
 
@@ -245,7 +295,9 @@ class AuthedUser:
 
     def get_blocked_id_pages(self) -> Generator[List[int], None, None]:
         """Requires user authentication"""
-        for loop_num, blocked_page in enumerate(tweepy.Cursor(self.api.blocks_ids, skip_status=True, include_entities=False).pages()):
+        for loop_num, blocked_page in enumerate(
+            tweepy.Cursor(self.api.blocks_ids, skip_status=True, include_entities=False
+        ).pages()):
             print("Requested blocked page #", loop_num+1, sep="")
             yield blocked_page
 
@@ -280,7 +332,8 @@ def update_blocklist(authed_user: AuthedUser, db_session: Session, force: bool =
 
         import_history.append(imported_blocks_page)
         imported_blocks_total += imported_blocks_page
-        LOGGER.debug("Imported %s blocks out of %s on this page", imported_blocks_page, len(blocked_id_page))
+        LOGGER.debug("Imported %s blocks out of %s on this page",
+                     imported_blocks_page, len(blocked_id_page))
 
         # exit early if we did not import any blocks in last three pages
         # this number was chosen arbitrarily, 3 pages = 15k blocked ids
@@ -299,12 +352,16 @@ def enqueue_block(user_id: int, db_session: Session, history_object: BlockHistor
                   whitelisted_accounts: Optional[List[int]] = None,
                  ) -> Tuple[Optional[BlockList], int]:
     """Convenience function for creating a BlockQueue row"""
-    if db_session.query(db_session.query(BlockList).filter(BlockList.user_id == user_id).exists()).scalar():
+    if db_session.query(
+        db_session.query(BlockList).filter(BlockList.user_id == user_id
+    ).exists()).scalar():
         #LOGGER.warning("User already blocked, skipping: %s", user_id)
         history_object.skipped_blocked += 1
         return None, 1
 
-    if db_session.query(db_session.query(BlockQueue).filter(BlockQueue.user_id == user_id).exists()).scalar():
+    if db_session.query(
+        db_session.query(BlockQueue).filter(BlockQueue.user_id == user_id
+    ).exists()).scalar():
         #LOGGER.warning("User already in block queue: %s", user_id)
         history_object.skipped_queued += 1
         return None, 2
@@ -406,7 +463,6 @@ def queue_blocks_for(target_user: User, authed_user: AuthedUser, db_session: Ses
         db_session.delete(block_history)
         db_session.commit()
 
-    # FIXME: remove target_user from metaqueue
     return block_history
 
 
@@ -463,7 +519,7 @@ def queue_unblocks_for(target_user: User, db_session: Session, session_comment: 
             new_unblocks = []
             for blocked_user in block_list_query.limit(500).all():
                 unblock = UnblockQueue(
-                    user_id=blocked_user.id, queued_at=time.time(), reason=blocked_user.reason,
+                    user_id=blocked_user.user_id, queued_at=time.time(), reason=blocked_user.reason,
                     reason_id=blocked_user.reason_id, session=block_history.id)
                 new_unblocks.append(unblock)
                 db_session.delete(blocked_user)
@@ -481,7 +537,7 @@ def queue_unblocks_for(target_user: User, db_session: Session, session_comment: 
     # else: order.mode = f"block:{'+'.join(mode)}"
 
 
-def process_block_queue(authed_user: AuthedUser, db_session: Session, batch_size: int = 20) -> int:
+def process_block_queue(authed_user: AuthedUser, db_session: Session, batch_size: int = 50) -> int:
     """"""
     LOGGER.debug("Starting block queue processing")
     time_start = time.time()
@@ -491,10 +547,12 @@ def process_block_queue(authed_user: AuthedUser, db_session: Session, batch_size
 
     blocked_num = 0
     queue_query = db_session.query(BlockQueue).\
-        filter(BlockQueue.queued_at <= time_start).order_by(BlockQueue.queued_at.desc())
+        filter(BlockQueue.queued_at <= time_start).\
+        order_by(BlockQueue.queued_at.desc()).\
+        limit(batch_size)
 
     while db_session.query(queue_query.exists()).scalar():
-        batch = queue_query.limit(batch_size).all()
+        batch = queue_query.all()
         try:
             for queued_block in batch:
                 if authed_user.followed_ids and queued_block.user_id in authed_user.followed_ids:
@@ -527,16 +585,15 @@ def process_block_queue(authed_user: AuthedUser, db_session: Session, batch_size
                         LOGGER.warning(
                             "User suspended (code 63), delaying block: %s", queued_block.user_id
                         )
-                        queued_block.queued_at += 86400 # wait a day before before re-attempting to block
+                        queued_block.queued_at += 86400 # wait a day before re-attempting to block
                         db_session.commit()
                         continue
-                    #tweepy.error.TweepError:
-                    #    Failed to send request:
-                    #        ('Connection aborted.', ConnectionResetError(104, 'Connection reset by peer'))
-                    # ^ err.api_code and err.response are None
-                    #FIXME: handle network errors by exiting early
+
                     raise
-                except:
+                except KeyboardInterrupt:
+                    # raise without printing error message
+                    raise
+                except Exception as exc:
                     LOGGER.error(
                         "Uncaught exception while trying to block user id %s", queued_block.user_id)
                     raise
@@ -545,12 +602,16 @@ def process_block_queue(authed_user: AuthedUser, db_session: Session, batch_size
                     user_id=blocked_user.id, block_time=time.time(), reason=queued_block.reason,
                     reason_id=queued_block.reason_id, session=queued_block.session)
 
-                print(f"Blocked {blocked_user.screen_name} ({blocked_user.name}) - id {blocked_user.id}")
-
                 db_session.add(block_row)
                 db_session.delete(queued_block)
                 db_session.commit()
                 blocked_num += 1
+
+                print(
+                    f"[{int(time.time())}] Blocked {blocked_user.screen_name} "
+                     "({blocked_user.name}) - id {blocked_user.id}"
+                )
+
         except KeyboardInterrupt:
             print("\nKeyboard interrupt detected, exiting early")
             LOGGER.info("queue processing early exit (keyboard interrupt)")
@@ -560,40 +621,31 @@ def process_block_queue(authed_user: AuthedUser, db_session: Session, batch_size
     return blocked_num
 
 
-def db_maintenance(db_session: Session) -> None:
+def clean_duplicate_blocks(db_session: Session) -> None:
     """"""
     LOGGER.info("Starting db maintenance")
     ###Clean orphaned blocks in queue
-    last_user_id = 0
-    block_queue_query = db_session.query(BlockQueue).\
-        filter(BlockQueue.user_id > last_user_id).order_by(BlockQueue.user_id)
     LOGGER.info("Cleaning up block queue...")
     print("Cleaning up block queue...")
-    while db_session.query(block_queue_query.exists()).scalar():
-        for queued_block in block_queue_query.limit(1000).all():
-            last_user_id = queued_block.user_id
-            matching_id_query = db_session.query(BlockList).\
-                filter(BlockList.user_id == queued_block.user_id)
-            if db_session.query(matching_id_query.exists()).scalar():
-                # remove block from queue if it has already been blocked
-                # this can happen after blocklist update or early exit in process_queue
-                LOGGER.warning("Deleting already blocked user from queue: %s", queued_block.user_id)
-                db_session.delete(queued_block)
+    duplicates_subquery = db_session.query(BlockQueue.user_id).\
+        intersect(db_session.query(BlockList.user_id)).subquery()
+    dupes = db_session.query(BlockQueue).\
+        filter(BlockQueue.user_id.in_(duplicates_subquery)).all()
+    if dupes:
+        print(f"Found {len(dupes)} duplicated blocks in queue")
+        for queued_dupe in dupes:
+            update_values = {
+                "reason":queued_dupe.reason,
+                "reason_id": queued_dupe.reason_id,
+                "session": queued_dupe.session
+            }
+            db_session.query(BlockList).\
+                filter(sqla.and_(BlockList.user_id == queued_dupe.user_id,
+                                 sqla.or_(
+                                     BlockList.reason == 0,
+                                     BlockList.reason_id.is_(None),
+                                     BlockList.session.is_(None)))).\
+                update(update_values)
+            db_session.delete(queued_dupe)
 
         db_session.commit()
-        block_queue_query = db_session.query(BlockQueue).\
-            filter(BlockQueue.user_id > last_user_id).order_by(BlockQueue.user_id)
-
-    #TODO: ^ do the same for unblocks
-    ###Clean orphaned unblocks in queue
-
-    ###Vacuum the database
-    vacuum_delay = 3600 # 1 hour
-    last_vacuum_row = Metadata.get_row("last_vacuum", db_session, "0")
-    if float(last_vacuum_row.val) + vacuum_delay <= time.time():
-        LOGGER.info("Vacuuming database...")
-        print("Vacuuming database...")
-        db_session.execute("VACUUM")
-        last_vacuum_row.val = str(time.time())
-
-    db_session.commit()
