@@ -609,7 +609,7 @@ def process_block_queue(authed_user: AuthedUser, db_session: Session, batch_size
 
                 print(
                     f"[{int(time.time())}] Blocked {blocked_user.screen_name} "
-                     "({blocked_user.name}) - id {blocked_user.id}"
+                    f"({blocked_user.name}) - id {blocked_user.id}"
                 )
 
         except KeyboardInterrupt:
