@@ -621,7 +621,7 @@ def process_block_queue(authed_user: AuthedUser, db_session: Session, batch_size
     return blocked_num
 
 
-def clean_duplicate_blocks(db_session: Session) -> None:
+def clean_duplicate_blocks(db_session: Session) -> bool:
     """"""
     LOGGER.info("Starting db maintenance")
     ###Clean orphaned blocks in queue
@@ -649,3 +649,5 @@ def clean_duplicate_blocks(db_session: Session) -> None:
             db_session.delete(queued_dupe)
 
         db_session.commit()
+        return True
+    return False

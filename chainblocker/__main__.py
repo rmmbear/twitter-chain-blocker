@@ -64,9 +64,9 @@ ARGPARSER.add_argument(
          "be on their separate lines, key first then secret.")
 ARGPARSER.add_argument(
     "--override-api-keys", type=str, metavar="KEY,SECRET",
-    help="Override api key and secret with your own. Argument must be passed as a string, key first "
-         "then secret, delimited with a comma: \"aaaaa,bbbbbbbbbb\". These can be obtained from "
-         "https://developer.twitter.com/en/apps")
+    help="Override api key and secret with your own. Argument must be passed as a string, key "
+         "first then secret, delimited with a comma: \"aaaaa,bbbbbbbbbb\". These can be obtained "
+         "from https://developer.twitter.com/en/apps")
 
 
 ARGP_COMMANDS = ARGPARSER.add_subparsers(title="Commands", dest="command", metavar="")
@@ -160,7 +160,7 @@ def main(paths: dict, args: Optional[str] = None) -> None:
 
     args.mode = args.mode.split("+")
     if len(args.mode) > 3:
-        sys.exit("ERROR: Received more than three targes for --mode\n"
+        sys.exit("ERROR: Received more than three targets for --mode\n"
                  "(only accepting 'target', 'followers' and 'followed')")
 
     unknown_mode = set(args.mode) - set(("target", "followers", "followed"))
@@ -222,11 +222,11 @@ def main(paths: dict, args: Optional[str] = None) -> None:
 
         if not args.only_queue_accounts and not args.only_queue_actions and args.command != "reason":
             chainblocker.clean_duplicate_blocks(db_session)
-            process_queues(current_user, db_session)
-            ###Vacuum the database
-            LOGGER.info("Vacuuming database...")
-            print("Vacuuming database...")
-            db_session.execute(sqla.text("VACUUM"))
+            if process_queues(current_user, db_session):
+                ###Vacuum the database
+                LOGGER.info("Vacuuming database...")
+                print("Vacuuming database...")
+                db_session.execute(sqla.text("VACUUM"))
 
 
         chainblocker.Metadata.set_row("clean_exit", 1, db_session)
@@ -440,7 +440,7 @@ def queue(authed_user: chainblocker.AuthedUser, db_session: Session,
             print()
 
 
-def process_queues(authed_user: chainblocker.AuthedUser, db_session: Session) -> None:
+def process_queues(authed_user: chainblocker.AuthedUser, db_session: Session) -> bool:
     """"""
     LOGGER.debug("Processing queues")
     #FIXME: do not count blocks and unblocks "in the future"
@@ -454,10 +454,11 @@ def process_queues(authed_user: chainblocker.AuthedUser, db_session: Session) ->
     print()
 
     if queued_unblocks:
+        raise NotImplementedError("Unblocking not implemented")
         LOGGER.debug("Processing unblock queue")
         print("Processing unblock queue")
         time_start = time.time()
-        unblocked_num = chainblocker.process_block_queue(authed_user, db_session)
+        unblocked_num = chainblocker.process_unblock_queue(authed_user, db_session)
         time_total = time.time() - time_start
 
         time_str = str(datetime.timedelta(seconds=time_total))
@@ -486,6 +487,8 @@ def process_queues(authed_user: chainblocker.AuthedUser, db_session: Session) ->
         LOGGER.info("Processed %s out of %s blocks)", blocked_num, queued_blocks)
         LOGGER.info("Processing took %s", time_str)
         LOGGER.info("processing + networking per block = %ss avg", blocked_num / time_total)
+
+    return queued_unblocks or queued_blocks
 
 
 if __name__ == "__main__":
